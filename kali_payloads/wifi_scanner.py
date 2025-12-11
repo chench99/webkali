@@ -1,190 +1,371 @@
 import subprocess
-import json
 import time
 import requests
-import shutil
 import os
+import csv
+import glob
 import sys
 import socket
+import re
+import shutil
 
 # ================= 配置区域 =================
-# 注意：部署时后端会自动通过 sed 替换这个值
-# 如果你手动运行，请手动填入 Windows 后端的 IP，例如 "192.168.1.5"
+# 部署时后端会自动注入 IP，手动测试请填入 Windows IP
 FIXED_C2_IP = ""
 PORT = "8001"
 HEARTBEAT_INTERVAL = 2
+TMP_DIR = "/tmp/kali_c2_scan"
+
+# 确保临时目录存在
+if not os.path.exists(TMP_DIR):
+    os.makedirs(TMP_DIR)
 
 
-# ===========================================
+# ================= 基础工具函数 =================
 
 def get_c2_ip():
-    """
-    智能获取 C2 服务器 IP
-    1. 优先使用硬编码的 FIXED_C2_IP
-    2. 如果为空，尝试通过连接局域网探测宿主机 IP
-    """
-    if FIXED_C2_IP:
-        return FIXED_C2_IP
-
-    # 尝试探测：如果是 NAT 模式，网关通常是宿主机
+    """智能探测 C2 服务器 IP"""
+    if FIXED_C2_IP: return FIXED_C2_IP
     try:
-        # 获取默认网关
+        # 探测默认网关
         gateway = os.popen("ip route show | grep default | awk '{print $3}'").read().strip()
-        if gateway:
-            return gateway
+        if gateway: return gateway
     except:
         pass
-
-    # 最后的兜底：默认回环（仅用于调试，实际大概率连不上）
     return "127.0.0.1"
 
 
-def get_kali_interfaces():
-    """获取网卡列表"""
-    interfaces = []
+def run_cmd(cmd):
+    """执行 Shell 命令并返回输出"""
     try:
-        # 获取所有网络接口
-        out = subprocess.check_output(["ip", "-o", "link", "show"]).decode()
-        for line in out.split('\n'):
-            if ": " not in line: continue
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip()
+    except:
+        return ""
 
-            parts = line.split(": ")
-            if len(parts) < 2: continue
 
-            iface = parts[1].split("@")[0].strip()
-            # 排除非物理网卡
-            if iface == "lo" or "docker" in iface or "veth" in iface: continue
+def get_driver_name(iface):
+    """获取网卡驱动/芯片名称 (用于前端友好显示)"""
+    # 方法1: 使用 ethtool 获取驱动名
+    try:
+        driver = subprocess.check_output(f"ethtool -i {iface} | grep driver", shell=True).decode().split(":")[1].strip()
+    except:
+        driver = "Unknown"
 
-            # 判断模式
-            mode = "Managed"
-            try:
-                iw_out = subprocess.check_output(["iw", "dev", iface, "info"], stderr=subprocess.DEVNULL).decode()
-                if "type monitor" in iw_out:
-                    mode = "Monitor"
-            except:
-                pass
+    # 方法2: 尝试获取更详细的 USB/PCI 设备名 (高级)
+    # 简单处理：如果 ethtool 拿到的是 usb 桥接，尝试读 usb ID
+    return driver
 
-            interfaces.append({
-                "name": iface,
-                "display": f"{iface} [{mode}]",
-                "mode": mode,
-                "is_wireless": True  # 简单假设都是无线，或者你可以加 ethtool 判断
-            })
-    except Exception as e:
-        print(f"[-] 获取网卡失败: {e}")
+
+def check_monitor_mode(iface):
+    """检查指定网卡是否已经是监听模式"""
+    try:
+        iw_info = run_cmd(f"iw dev {iface} info")
+        if "type monitor" in iw_info:
+            return True
+    except:
+        pass
+    return False
+
+
+# ================= 核心：智能网卡管理 =================
+
+def get_smart_interfaces():
+    """
+    智能获取网卡列表
+    格式: { "name": "wlan0", "display": "rtl88xxau (wlan0)", "mode": "Monitor" }
+    """
+    interfaces = []
+    # 列出所有网络接口
+    sys_cls_net = "/sys/class/net"
+    if not os.path.exists(sys_cls_net): return []
+
+    for iface in os.listdir(sys_cls_net):
+        # 排除非无线网卡 (检查是否有 wireless 目录或 phy80211)
+        if iface == "lo" or iface.startswith("eth") or iface.startswith("docker"):
+            continue
+
+        # 进一步确认是否为无线设备
+        if not os.path.exists(f"{sys_cls_net}/{iface}/wireless") and not os.path.exists(
+                f"{sys_cls_net}/{iface}/phy80211"):
+            # 某些现代驱动可能不创建 wireless 目录，尝试用 iw dev 确认
+            if not run_cmd(f"iw dev {iface} info"):
+                continue
+
+        # 1. 获取驱动名称 (e.g., rtl88xxau)
+        driver = get_driver_name(iface)
+
+        # 2. 获取当前模式
+        mode = "Monitor" if check_monitor_mode(iface) else "Managed"
+
+        # 3. 构造友好名称
+        # 前端显示格式: "驱动名 (接口名)" -> "rtl88xxau (wlan0)"
+        display_name = f"{driver} ({iface})"
+        if mode == "Monitor":
+            display_name = f"🔥 {driver} ({iface})"
+
+        interfaces.append({
+            "name": iface,
+            "display": display_name,
+            "mode": mode,
+            "is_wireless": True
+        })
 
     return interfaces
 
 
-def perform_scan(interface):
-    """执行扫描"""
-    print(f"[+] 正在扫描: {interface}")
-    networks = []
+def ensure_monitor_mode(original_iface):
+    """
+    【智能核心】
+    1. 检查网卡是否为监听模式
+    2. 如果不是，自动开启 airmon-ng
+    3. 自动识别开启后的新名称 (如 wlan0 -> wlan0mon)
+    """
+    print(f"[*] 正在检查网卡状态: {original_iface}")
 
-    # 优先使用 nmcli (Managed模式)
+    # 1. 如果已经是监听模式，直接返回
+    if check_monitor_mode(original_iface):
+        print(f"[+] {original_iface} 已经是监听模式")
+        return original_iface
+
+    # 2. 尝试开启监听模式
+    print(f"[*] 正在尝试开启监听模式: {original_iface} ...")
+
+    # 先杀掉干扰进程 (可选，根据稳定性需求)
+    run_cmd("airmon-ng check kill")
+
+    # 启动 airmon-ng
+    output = run_cmd(f"airmon-ng start {original_iface}")
+
+    # 3. 智能捕获新名称
+    # airmon-ng 输出通常包含: "monitor mode enabled on [phy0]wlan0mon"
+    # 我们重新扫描所有网卡，找到那个驱动相同且处于 Monitor 模式的网卡
+
+    # 简单策略：检查常见的更名规则
+    potential_names = [original_iface, f"{original_iface}mon", "mon0"]
+
+    # 重新获取一次系统网卡列表
+    current_ifaces = os.listdir("/sys/class/net")
+
+    # 优先在列表中找
+    for name in current_ifaces:
+        # 如果名字匹配，且处于 monitor 模式
+        if name in potential_names or name.startswith(original_iface):
+            if check_monitor_mode(name):
+                print(f"[+] 成功开启监听模式! 新接口名: {name}")
+                return name
+
+    # 如果没找到改名规律，就遍历所有网卡找一个 Monitor 模式的
+    for name in current_ifaces:
+        if check_monitor_mode(name):
+            print(f"[+] 找到可用监听接口: {name}")
+            return name
+
+    print("[-] 开启监听模式失败，将尝试使用原接口")
+    return original_iface
+
+
+# ================= 业务功能函数 =================
+
+def parse_airodump_csv(csv_path):
+    """解析 CSV 数据"""
+    clients = []
     try:
-        cmd = ["nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY", "dev", "wifi", "list", "ifname", interface]
-        # 注意：subprocess 在后台运行时可能因为缓冲导致卡顿，这里用 check_output
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode(errors='ignore')
+        if not os.path.exists(csv_path): return []
+        # 防止文件锁，复制一份读取
+        tmp_read = csv_path + ".read"
+        shutil.copy(csv_path, tmp_read)
 
-        for line in out.split('\n'):
-            if not line.strip(): continue
-            # nmcli -t 输出格式: SSID:BSSID:CHAN:SIGNAL:SECURITY
-            # 因为 SSID 可能包含冒号，我们从后面倒着解析
-            parts = line.split(':')
-            if len(parts) < 5: continue
+        with open(tmp_read, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
 
-            sec = parts[-1]
-            sig = parts[-2]
-            chan = parts[-3]
+        start_idx = -1
+        for i, line in enumerate(lines):
+            if line.startswith("Station MAC"):
+                start_idx = i
+                break
 
-            # BSSID 是固定的 6段 (MAC地址)
-            # 倒数第4到倒数第9个部分组成 BSSID
-            # 例如: ...:AA:BB:CC:DD:EE:FF:6:80:WPA2
-            if len(parts) >= 9:
-                bssid = ":".join(parts[-9:-3])
-                # 剩下的前面就是 SSID
-                ssid_parts = parts[:-9]
-                ssid = ":".join(ssid_parts).strip()
-            else:
-                continue
+        if start_idx != -1:
+            reader = csv.reader(lines[start_idx + 1:])
+            for row in reader:
+                if len(row) < 6: continue
+                clients.append({
+                    'mac': row[0].strip(),
+                    'power': row[3].strip(),
+                    'packets': row[4].strip(),
+                    'bssid': row[5].strip(),
+                    'probed': row[6].strip() if len(row) > 6 else ""
+                })
+    except:
+        pass
+    return clients
 
-            if not ssid: ssid = "<Hidden>"
 
-            # 信号强度处理
-            try:
-                signal_val = int(sig)
-                # nmcli 有时输出 0-100 的质量值，有时是 dBm。简单转换一下
-                if signal_val > 0:
-                    dbm = (signal_val / 2) - 100
-                else:
-                    dbm = signal_val
-            except:
-                dbm = -80
+def perform_scan_airodump(iface):
+    """
+    使用 airodump-ng 进行快速扫描 (替代 nmcli)
+    因为我们要开监听模式，nmcli 可能会失效，统一用 airodump 更稳
+    """
+    networks = []
+    print(f"[*] 使用 airodump-ng 扫描 (接口: {iface})")
 
-            networks.append({
-                "ssid": ssid,
-                "bssid": bssid,
-                "channel": int(chan) if chan.isdigit() else 1,
-                "signal": int(dbm),
-                "encryption": sec,
-                "vendor": "Unknown"
-            })
+    prefix = f"{TMP_DIR}/scan_result"
+    # 扫描 5 秒
+    cmd = ["timeout", "5s", "airodump-ng", "--write", prefix, "--output-format", "csv", iface]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    except Exception as e:
-        print(f"[-] 扫描出错: {e}")
+    csv_file = f"{prefix}-01.csv"
+    if os.path.exists(csv_file):
+        try:
+            with open(csv_file, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f)
+                # 跳过空行和非 AP 行
+                for row in reader:
+                    if not row or len(row) < 14: continue
+                    if row[0].strip() == "BSSID": continue  # 标题行
+                    if row[0].strip() == "Station MAC": break  # 到了客户端部分，停止
+
+                    ssid = row[13].strip()
+                    if not ssid: ssid = "<Hidden>"
+
+                    networks.append({
+                        "ssid": ssid,
+                        "bssid": row[0].strip(),
+                        "channel": int(row[3].strip()),
+                        "signal": int(row[8].strip()),
+                        "encryption": row[5].strip(),
+                        "vendor": "Unknown"
+                    })
+        except Exception as e:
+            print(f"[-] 解析扫描结果失败: {e}")
+
+    # 清理
+    for f in glob.glob(f"{prefix}*"):
+        try:
+            os.remove(f)
+        except:
+            pass
 
     return networks
 
 
-def main():
-    # 1. 获取 C2 地址
+def run_monitor_task(task_type, params, original_iface):
+    """执行持续监听任务"""
+    # 1. 【智能切换】确保进入监听模式，并获取正确名称
+    mon_iface = ensure_monitor_mode(original_iface)
+
+    # 清理旧文件
+    for f in glob.glob(f"{TMP_DIR}/*"):
+        try:
+            os.remove(f)
+        except:
+            pass
+
+    prefix = f"{TMP_DIR}/output"
+    cmd = ["airodump-ng", "--write", prefix, "--output-format", "csv"]
+
+    if task_type == 'monitor_target':
+        bssid = params.get('bssid')
+        channel = params.get('channel')
+        # 必须先切信道
+        run_cmd(f"iwconfig {mon_iface} channel {channel}")
+        cmd.extend(["--bssid", bssid, "--channel", str(channel)])
+        print(f"[*] 启动定向监听: {bssid} on {mon_iface} (CH {channel})")
+
+    elif task_type == 'deep_scan':
+        print(f"[*] 启动深度全网扫描: {mon_iface}")
+        # 深度扫描不加过滤
+
+    cmd.append(mon_iface)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    csv_file = f"{prefix}-01.csv"
+
+    # 获取 C2 URL
     c2_ip = get_c2_ip()
     base_url = f"http://{c2_ip}:{PORT}/api/v1/wifi"
 
-    # 禁用系统代理 (防止 requests 走代理报错)
+    try:
+        while True:
+            # 检查任务状态
+            try:
+                r = requests.get(f"{base_url}/agent/heartbeat", timeout=2)
+                remote_task = r.json().get("task")
+                if remote_task == "idle" or remote_task != task_type:
+                    print("[*] 收到停止/变更指令")
+                    break
+            except:
+                pass
+
+            clients = parse_airodump_csv(csv_file)
+            if clients:
+                update_type = 'monitor_update' if task_type == 'monitor_target' else 'deep_update'
+                try:
+                    requests.post(f"{base_url}/callback", json={
+                        "type": update_type,
+                        "data": clients
+                    })
+                except:
+                    pass
+
+            time.sleep(2)
+
+    finally:
+        if proc: proc.terminate()
+        print("[*] 监听任务结束")
+
+
+# ================= 主程序 =================
+
+def main():
+    c2_ip = get_c2_ip()
+    base_url = f"http://{c2_ip}:{PORT}/api/v1/wifi"
     os.environ['no_proxy'] = '*'
 
-    print(f"[*] Kali Agent 启动，C2 Server: {base_url}")
+    print(f"[*] Smart Agent v6.0 Started. C2: {base_url}")
 
-    # 2. 注册上线
-    ifaces = get_kali_interfaces()
+    # 首次注册
     try:
+        ifaces = get_smart_interfaces()
         requests.post(f"{base_url}/register_agent", json={"interfaces": ifaces}, timeout=5)
-        print("[+] 注册成功，等待任务...")
-    except Exception as e:
-        print(f"[-] 注册失败 (检查IP {c2_ip} 是否可达): {e}")
-        # 这里不要退出，继续尝试连接，也许 C2 还没启动好
+        print(f"[+] 注册成功，发现 {len(ifaces)} 个无线接口")
+    except:
+        print("[-] 注册失败，进入离线重试循环")
 
-    # 3. 守护循环
     while True:
         try:
-            # 心跳
             r = requests.get(f"{base_url}/agent/heartbeat", timeout=5)
             data = r.json()
             task = data.get("task")
+            params = data.get("params", {})
+
+            # 每次心跳都更新一下网卡状态 (因为可能刚刚开了 Monitor 模式，名字变了)
+            # 这样前端能看到网卡名字变成了 "🔥 rtl88xxau (wlan0mon)"
+            current_ifaces = get_smart_interfaces()
+            if current_ifaces:
+                requests.post(f"{base_url}/register_agent", json={"interfaces": current_ifaces})
 
             if task == "scan":
-                iface = data.get("params", {}).get("interface")
-                if not iface and ifaces: iface = ifaces[0]["name"]
+                iface = params.get("interface")
+                # 智能切换模式扫描
+                mon_iface = ensure_monitor_mode(iface)
+                res = perform_scan_airodump(mon_iface)
+                requests.post(f"{base_url}/callback", json={"type": "scan_result", "networks": res})
 
-                if iface:
-                    res = perform_scan(iface)
-                    # 回传结果
-                    requests.post(f"{base_url}/callback", json={
-                        "type": "scan_result",
-                        "networks": res
-                    })
+            elif task in ["monitor_target", "deep_scan"]:
+                iface = params.get("interface")
+                if not iface and current_ifaces: iface = current_ifaces[0]["name"]
+                # 进入阻塞式监听
+                run_monitor_task(task, params, iface)
 
             elif task == "idle":
                 pass
 
         except Exception as e:
-            print(f"[!] 心跳异常: {e}")
+            # print(f"[!] Loop Error: {e}")
+            pass
 
         time.sleep(HEARTBEAT_INTERVAL)
 
 
 if __name__ == "__main__":
-    # 必须去掉所有 input()，否则 nohup 会报错 EOFError
     main()
