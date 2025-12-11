@@ -4,23 +4,34 @@
     <div class="panel-header flex justify-between items-end mb-6 border-b border-gray-700 pb-4">
       <div>
         <h2 class="text-2xl font-bold flex items-center gap-3 text-blue-400">
-          <span class="text-3xl">🐉</span> Kali 渗透控制台 <span class="text-sm text-gray-500 font-normal border border-gray-600 px-2 rounded">v3.0 NATIVE</span>
+          <span class="text-3xl">🐉</span> Kali 无线渗透 C2 控制台 <span class="text-sm text-gray-500 font-normal border border-gray-600 px-2 rounded">v4.0 PRO</span>
         </h2>
-        <div class="text-gray-500 text-xs mt-1">Kali Linux C2 Platform | 真实硬件驱动 | 深度嗅探</div>
+        <div class="text-gray-500 text-xs mt-1">
+          C2 架构 | 远程指令下发 | 分布式扫描
+        </div>
       </div>
 
       <div class="system-status flex gap-4 text-xs bg-gray-800 px-4 py-2 rounded border border-gray-700 shadow-inner">
         <div class="flex items-center gap-2">
           <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-          <span class="text-gray-400">C2 节点:</span>
-          <span class="text-green-400">Online</span>
+          <span class="text-gray-400">C2 核心:</span>
+          <span class="text-green-400">运行中</span>
         </div>
+        
+        <div class="flex items-center gap-2 border-l border-gray-600 pl-4">
+          <span class="text-gray-400">Kali Agent:</span>
+          <span :class="interfaces.length > 0 && interfaces[0].name !== 'waiting' ? 'text-green-400 font-bold' : 'text-red-400 animate-pulse'">
+            {{ interfaces.length > 0 && interfaces[0].name !== 'waiting' ? '已连接' : '等待接入...' }}
+          </span>
+        </div>
+
         <div class="flex items-center gap-2 border-l border-gray-600 pl-4">
           <span class="text-gray-400">操作员:</span>
           <span class="text-white font-bold">{{ systemStatus.online_users || 1 }}</span>
         </div>
+        
         <div class="flex items-center gap-2 border-l border-gray-600 pl-4">
-          <span class="text-gray-400">CPU 负载:</span>
+          <span class="text-gray-400">Server CPU:</span>
           <span :class="getLoadClass(systemStatus.cpu_percent)">{{ systemStatus.cpu_percent || 0 }}%</span>
         </div>
       </div>
@@ -30,41 +41,51 @@
       
       <div class="flex gap-3 items-center">
         <div class="flex items-center gap-2">
-          <span class="text-sm text-gray-400 font-bold">监听接口 (Interface):</span>
+          <span class="text-sm text-gray-400 font-bold">监听接口:</span>
           <select 
             v-model="selectedInterface" 
-            class="bg-gray-900 border border-gray-600 text-white px-3 py-1.5 rounded text-sm focus:border-blue-500 outline-none w-56 font-mono"
+            class="bg-gray-900 border border-gray-600 text-white px-3 py-1.5 rounded text-sm focus:border-blue-500 outline-none w-64 font-mono"
+            :disabled="isScanning"
           >
-            <option value="" disabled>正在加载 Kali 网卡...</option>
+            <option value="" disabled>请选择 Agent 网卡...</option>
             <option v-for="iface in interfaces" :key="iface.name" :value="iface.name">
-              {{ iface.name }} [{{ iface.mode }}]
+              {{ iface.display || iface.name }} [{{ iface.mode || 'Managed' }}]
             </option>
           </select>
-          <button @click="fetchInterfaces" title="刷新列表" class="text-gray-400 hover:text-white px-2 hover:rotate-180 transition-transform">↻</button>
+          <button @click="fetchInterfaces" title="刷新 Kali 网卡列表" class="text-gray-400 hover:text-white px-2 transition-transform hover:rotate-180">↻</button>
         </div>
+
+        <a 
+          href="/api/v1/wifi/payload.py" 
+          target="_blank" 
+          class="text-xs text-blue-400 underline hover:text-blue-300 flex items-center gap-1"
+          title="下载此脚本到 Kali 运行以连接 C2"
+        >
+          <span>📥</span> 下载 Payload
+        </a>
 
         <div class="search-box relative ml-4">
           <span class="absolute left-2 top-1.5 text-gray-500 text-xs">🔍</span>
           <input 
             v-model="searchQuery"
             type="text" 
-            placeholder="过滤 ESSID / MAC / 厂商..." 
-            class="bg-gray-900 border border-gray-600 text-white pl-8 pr-4 py-1.5 rounded focus:outline-none focus:border-blue-500 w-64 text-sm"
+            placeholder="搜索 SSID / MAC / 厂商..." 
+            class="bg-gray-900 border border-gray-600 text-white pl-8 pr-4 py-1.5 rounded focus:outline-none focus:border-blue-500 w-56 text-sm"
           >
         </div>
       </div>
 
       <div class="controls flex gap-3 items-center">
-        <div class="text-xs text-gray-500 mr-2">
-          目标: {{ filteredNetworks.length }}
+        <div class="text-xs text-gray-500 mr-2 font-mono">
+          目标总数: <span class="text-white">{{ filteredNetworks.length }}</span>
         </div>
         <button 
-          class="px-5 py-2 rounded bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 disabled:opacity-50 transition-all shadow-lg flex items-center gap-2 font-bold text-sm"
-          :disabled="isScanning"
+          class="px-5 py-2 rounded bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg flex items-center gap-2 font-bold text-sm"
+          :disabled="isScanning || !hasAgent"
           @click="startScan"
         >
           <span v-if="isScanning" class="animate-spin">⏳</span>
-          {{ isScanning ? '正在调用 nmcli 扫描...' : '执行全频段扫描' }}
+          {{ isScanning ? '等待 Agent 回传...' : '执行全频段扫描 (SCAN)' }}
         </button>
       </div>
     </div>
@@ -73,34 +94,57 @@
       <table class="w-full text-left text-sm">
         <thead class="bg-gray-900 text-gray-400 uppercase tracking-wider">
           <tr>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('ssid')">ESSID ⇅</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('bssid')">BSSID (MAC) ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('ssid')">ESSID ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('bssid')">BSSID (MAC) ⇅</th>
             <th class="p-4 border-b border-gray-700">设备厂商</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('channel')">信道/频段 ⇅</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('encryption')">加密 ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('channel')">信道/频段 ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('encryption')">加密 ⇅</th>
+            
             <th class="p-4 border-b border-gray-700 font-bold text-blue-400">在线终端</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('signal')">信号 ⇅</th>
+            
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('signal')">信号 ⇅</th>
             <th class="p-4 border-b border-gray-700">威胁情报</th>
             <th class="p-4 text-right border-b border-gray-700">渗透操作</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-700">
+          
           <tr v-if="filteredNetworks.length === 0 && !isScanning">
             <td colspan="9" class="p-12 text-center text-gray-500">
-              <div class="text-4xl mb-2">📡</div>
-              <div>暂无数据，请确认网卡 [{{ selectedInterface || '无' }}] 状态正常</div>
+              <div v-if="!hasAgent" class="flex flex-col items-center gap-2">
+                <div class="text-4xl">🔌</div>
+                <div class="font-bold text-red-400">Agent 未连接</div>
+                <div class="text-sm">请在 Kali 中运行 payload.py 并连接到此服务器</div>
+              </div>
+              <div v-else class="flex flex-col items-center gap-2">
+                <div class="text-4xl">📡</div>
+                <div>暂无扫描数据，请点击右上角执行扫描</div>
+              </div>
             </td>
           </tr>
 
-          <tr v-for="(net, index) in filteredNetworks" :key="index" class="hover:bg-gray-700 transition-colors group">
-            
+          <tr v-if="filteredNetworks.length === 0 && isScanning">
+             <td colspan="9" class="p-12 text-center text-blue-400 animate-pulse">
+               正在等待 Kali Agent 回传数据... (超时时间 15s)
+             </td>
+          </tr>
+
+          <tr 
+            v-for="(net, index) in filteredNetworks" 
+            :key="index" 
+            class="hover:bg-gray-700 transition-colors group"
+          >
             <td class="p-4 font-bold text-white group-hover:text-blue-300 transition-colors">
               {{ net.ssid || '<Hidden>' }}
             </td>
             
-            <td class="p-4 text-gray-400 font-mono text-xs">{{ net.bssid }}</td>
+            <td class="p-4 text-gray-400 font-mono text-xs select-all">
+              {{ net.bssid }}
+            </td>
             
-            <td class="p-4 text-gray-300 text-xs">{{ net.vendor || 'Unknown' }}</td>
+            <td class="p-4 text-gray-300 text-xs">
+              {{ net.vendor || 'Unknown' }}
+            </td>
             
             <td class="p-4">
               <div class="flex flex-col">
@@ -110,19 +154,30 @@
             </td>
             
             <td class="p-4">
-              <span class="px-2 py-0.5 rounded text-xs font-bold border" :class="getEncClass(net.encryption)">
+              <span 
+                class="px-2 py-0.5 rounded text-xs font-bold border" 
+                :class="getEncClass(net.encryption)"
+              >
                 {{ net.encryption }}
               </span>
             </td>
 
             <td class="p-4 text-xs font-mono">
-              <span v-if="net.clients >= 0" class="text-green-400 font-bold">{{ net.clients }} 台</span>
-              <span v-else class="text-gray-600 border border-gray-700 px-1 rounded cursor-help" title="需要 Monitor 模式深度嗅探才能获取">🔍 需监听</span>
+              <span v-if="net.clients >= 0" class="text-green-400 font-bold bg-green-900/20 px-2 py-0.5 rounded">
+                {{ net.clients }} 台
+              </span>
+              <span v-else class="text-gray-500 border border-gray-600 px-1 rounded cursor-help" title="普通扫描无法获取终端数，请开启 Monitor 模式嗅探">
+                🔍 需监听
+              </span>
             </td>
             
             <td class="p-4">
               <div class="w-24 bg-gray-900 rounded-full h-1.5 mt-1 overflow-hidden">
-                <div class="h-full transition-all duration-500" :class="getSignalColor(net.signal)" :style="{ width: getSignalPercent(net.signal) + '%' }"></div>
+                <div 
+                  class="h-full transition-all duration-500" 
+                  :class="getSignalColor(net.signal)" 
+                  :style="{ width: getSignalPercent(net.signal) + '%' }"
+                ></div>
               </div>
               <div class="text-xs text-gray-500 mt-1 flex justify-between w-24">
                 <span>{{ net.signal }} dBm</span>
@@ -158,8 +213,8 @@ export default {
     return {
       isScanning: false,
       searchQuery: "",
-      selectedInterface: "",
-      interfaces: [],
+      selectedInterface: "", 
+      interfaces: [], 
       sortKey: 'signal',
       sortOrder: -1,
       networks: [],
@@ -168,8 +223,14 @@ export default {
     };
   },
   computed: {
+    // 判断是否有有效的 Kali Agent 连接
+    hasAgent() {
+      return this.interfaces.length > 0 && this.interfaces[0].name !== 'waiting';
+    },
+    // 过滤 + 排序逻辑
     filteredNetworks() {
       let result = this.networks;
+      // 1. 搜索过滤
       if (this.searchQuery) {
         const q = this.searchQuery.toLowerCase();
         result = result.filter(n => 
@@ -178,6 +239,7 @@ export default {
           (n.vendor && n.vendor.toLowerCase().includes(q))
         );
       }
+      // 2. 排序逻辑
       result = result.sort((a, b) => {
         let valA = a[this.sortKey]; let valB = b[this.sortKey];
         if (typeof valA === 'string') { valA = valA.toLowerCase(); valB = valB.toLowerCase(); }
@@ -188,67 +250,83 @@ export default {
   },
   mounted() {
     this.fetchSystemStatus();
-    this.fetchInterfaces();
-    this.statusTimer = setInterval(this.fetchSystemStatus, 5000);
+    this.fetchInterfaces(); 
+    // 每3秒刷新一次状态，检查 Agent 是否上线
+    this.statusTimer = setInterval(() => {
+        this.fetchSystemStatus();
+        // 如果网卡列表是空的或者还在等待，尝试刷新
+        if (!this.hasAgent) this.fetchInterfaces();
+    }, 3000);
   },
   beforeDestroy() {
     if (this.statusTimer) clearInterval(this.statusTimer);
   },
   methods: {
+    // 1. 获取系统状态
     async fetchSystemStatus() {
       try { const res = await axios.get('/api/v1/system/status'); if (res.data) this.systemStatus = res.data; } catch (e) {}
     },
     
-    // 获取 Kali 原生网卡列表
+    // 2. 获取 Agent 网卡列表
     async fetchInterfaces() {
       try {
         const res = await axios.get('/api/v1/wifi/interfaces');
         if (res.data && res.data.interfaces) {
-          this.interfaces = res.data.interfaces;
-          // 智能选择逻辑：优先选 Monitor 模式的，其次是 wlan0
-          const monitorIface = this.interfaces.find(i => i.mode === 'Monitor');
-          const wlan0 = this.interfaces.find(i => i.name === 'wlan0');
-          
-          if (monitorIface) this.selectedInterface = monitorIface.name;
-          else if (wlan0) this.selectedInterface = wlan0.name;
-          else if (this.interfaces.length > 0) this.selectedInterface = this.interfaces[0].name;
+          const newInterfaces = res.data.interfaces;
+          // 只有当数据变化时才更新，防止下拉框闪烁
+          if (JSON.stringify(newInterfaces) !== JSON.stringify(this.interfaces)) {
+             this.interfaces = newInterfaces;
+             // 自动选中逻辑: 优先 Monitor, 其次 wlan0, 排除 waiting
+             if (this.hasAgent && !this.selectedInterface) {
+                 const monitor = this.interfaces.find(i => i.mode === 'Monitor');
+                 const wireless = this.interfaces.find(i => i.is_wireless);
+                 if (monitor) this.selectedInterface = monitor.name;
+                 else if (wireless) this.selectedInterface = wireless.name;
+                 else this.selectedInterface = this.interfaces[0].name;
+             }
+          }
         }
       } catch (error) {
-        console.error("获取网卡失败", error);
+        console.error("Agent 通信失败", error);
       }
     },
 
+    // 3. 触发 C2 扫描
     async startScan() {
       if (!this.selectedInterface) {
-        alert("错误: 未检测到可用网卡 (wlan0)！请检查 Kali 设置。");
+        alert("请先选择一个 Kali 网卡！");
         return;
       }
       this.isScanning = true;
       try {
+        // 请求 C2 触发扫描，这个请求会 pending 直到 Kali 回传数据
         const payload = { interface: this.selectedInterface };
         const res = await axios.post('/api/v1/wifi/scan/start', payload);
         
-        if (res.data.networks) this.networks = res.data.networks;
-        else if (Array.isArray(res.data)) this.networks = res.data;
-        
-        if (this.networks.length > 0) this.$message?.success(`扫描完成: ${this.networks.length} 个 AP`);
-        else this.$message?.warning("未发现信号");
+        if (res.data.status === 'timeout') {
+            this.$message?.error("扫描超时：Kali Agent 未响应。请检查 Payload 是否在运行。");
+        } else {
+            if (res.data.networks) this.networks = res.data.networks;
+            this.$message?.success(`Agent 回传成功: 更新 ${this.networks.length} 个目标`);
+        }
       } catch (error) {
         console.error("Scan Error:", error);
-        alert("扫描异常: " + (error.response?.data?.detail || error.message));
+        alert("C2 通信错误: " + (error.response?.data?.detail || error.message));
       } finally {
         this.isScanning = false;
       }
     },
     
+    // 4. 攻击指令
     async attackTarget(net) {
-      if(!confirm(`⚠️ 确认对 [${net.ssid}] 发起攻击?`)) return;
+      if(!confirm(`⚠️ 确认下发攻击指令?\n目标: ${net.ssid} (${net.bssid})\nAgent 将执行 Deauth 攻击。`)) return;
       try {
         await axios.post('/api/v1/wifi/capture/start', { bssid: net.bssid, channel: net.channel });
-        alert("✅ 攻击模块已启动");
-      } catch(e) { alert("攻击失败: " + e.message); }
+        alert("✅ 指令已进入 C2 队列");
+      } catch(e) { alert("指令下发失败: " + e.message); }
     },
     
+    // 5. 辅助函数
     sortBy(key) { if (this.sortKey === key) this.sortOrder *= -1; else { this.sortKey = key; this.sortOrder = 1; } },
     
     getEncClass(enc) {
@@ -264,9 +342,9 @@ export default {
     getIntelligence(net) {
       let tags = []; const enc = (net.encryption || "").toUpperCase(); const vendor = (net.vendor || "").toLowerCase();
       if (enc.includes("OPEN")) tags.push(`<span class="text-red-400 text-xs border border-red-500 px-1 rounded bg-red-900/30">⚠️ 不安全</span>`);
-      if (enc.includes("WEP")) tags.push(`<span class="text-orange-400 text-xs border border-orange-500 px-1 rounded">🔓 极弱</span>`);
+      if (enc.includes("WEP")) tags.push(`<span class="text-orange-400 text-xs border border-orange-500 px-1 rounded">🔓 弱加密</span>`);
       if (vendor.includes("apple")) tags.push(`<span class="text-gray-300 text-xs">🍎 Apple</span>`);
-      if (vendor.includes("xiaomi")) tags.push(`<span class="text-orange-300 text-xs">📱 MiOT</span>`);
+      if (vendor.includes("xiaomi")) tags.push(`<span class="text-orange-300 text-xs">📱 小米</span>`);
       if (parseInt(net.signal) > -50) tags.push(`<span class="text-green-400 text-xs">📍 极近</span>`);
       return tags.length > 0 ? tags.join(" ") : `<span class="text-gray-600 text-xs">-</span>`;
     }
@@ -274,11 +352,7 @@ export default {
 };
 </script>
 
-### 核心变更总结
-1.  **后端**：
-    * 使用 `iw dev` 精准识别 Kali 网卡模式。
-    * 扫描结果中增加了 `clients` 字段。
-2.  **前端**：
-    * 表格中增加了 **“在线终端”** 这一列。
-    * 下拉框会显示网卡模式（Managed/Monitor）。
-    * 界面完全中文化，符合你的“不可简化”要求。
+<style scoped>
+.animate-spin { animation: spin 1s linear infinite; } @keyframes spin { 100% { transform: rotate(360deg); } }
+.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; } @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+</style>
