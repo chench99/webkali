@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+pymysql
+cryptography
+paramiko
+python-dotenv
+pydantic-settings
+psutil
+gputil
+scapy
+requests
