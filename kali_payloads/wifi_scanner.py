@@ -1,150 +1,172 @@
-import sys
+# backend/kali_payloads/wifi_scanner.py
+
 import subprocess
-import csv
-import time
-import os
 import json
+import sys
+import time
+import requests
+import shutil
+import re
 
-# === 默认配置 ===
-INTERFACE = "wlan0"
-OUTPUT_PREFIX = "/tmp/scan_results"
+# =================配置区域=================
+# C2 服务器地址 (Kali 运行此脚本时回传数据的地址)
+C2_SERVER = "http://127.0.0.1:8000"  # 请根据实际情况修改为宿主机 IP
+CALLBACK_URL = f"{C2_SERVER}/api/v1/wifi/callback"
+# ==========================================
+
+OUI_DB = {
+    "DC:D2:FC": "TP-Link", "50:D4:F7": "TP-Link", "98:48:27": "TP-Link",
+    "80:EA:96": "NetGear", "A0:04:60": "NetGear",
+    "D8:32:14": "Xiaomi", "64:CC:2E": "Xiaomi", "28:6C:07": "Xiaomi",
+    "FC:48:EF": "Huawei", "48:46:C1": "Huawei", "00:E0:FC": "Huawei",
+    "BC:54:36": "Tenda", "C8:3A:35": "Tenda",
+    "88:66:5A": "Apple", "BC:D1:19": "Apple", "AC:F7:F3": "Xiaomi",
+    "B8:27:EB": "Raspberry Pi", "00:0C:29": "VMware"
+}
 
 
-def get_current_mode(iface):
+def get_vendor(mac_addr):
     try:
-        output = subprocess.getoutput(f"iwconfig {iface} 2>/dev/null")
-        if "Mode:Monitor" in output: return "monitor"
-        return "managed"
+        if not mac_addr: return "Unknown"
+        prefix = mac_addr.upper().replace("-", ":")[:8]
+        for oui, vendor in OUI_DB.items():
+            if prefix.startswith(oui): return vendor
+        return "Unknown"
     except:
-        return "unknown"
+        return "Unknown"
 
 
-def enable_monitor_mode(iface):
-    print(f"[*] Checking interface: {iface}...")
-    if not os.path.exists(f"/sys/class/net/{iface}"):
-        if os.path.exists(f"/sys/class/net/{iface}mon"): return f"{iface}mon"
-
-    if get_current_mode(iface) == "monitor": return iface
-
-    print(f"[*] Enabling monitor mode on {iface}...")
-    os.system("killall wpa_supplicant 2>/dev/null")
-    os.system(f"airmon-ng start {iface} > /dev/null 2>&1")
-
-    mon_iface = f"{iface}mon"
-    if os.path.exists(f"/sys/class/net/{mon_iface}"): return mon_iface
-    return iface
+def get_band(channel):
+    try:
+        ch = int(channel)
+        if 1 <= ch <= 14:
+            return "2.4GHz"
+        elif 36 <= ch <= 173:
+            return "5GHz"
+        return "Unknown"
+    except:
+        return "2.4GHz"
 
 
-def start_scan():
-    target_iface = enable_monitor_mode(INTERFACE)
-    os.system("killall airodump-ng 2>/dev/null")
-    os.system(f"rm {OUTPUT_PREFIX}* 2>/dev/null")
+def get_kali_interfaces():
+    """获取 Kali 真实网卡 (iw dev)"""
+    interfaces = []
+    if shutil.which("iw"):
+        try:
+            output = subprocess.check_output(["iw", "dev"]).decode('utf-8')
+            current_iface = {}
+            for line in output.split('\n'):
+                line = line.strip()
+                if line.startswith("Interface"):
+                    current_iface = {
+                        "name": line.split()[1],
+                        "is_wireless": True,
+                        "mode": "Unknown",
+                        "mac": "Unknown"
+                    }
+                    interfaces.append(current_iface)
+                elif line.startswith("type") and current_iface:
+                    current_iface["mode"] = line.split()[1].title()
+                elif line.startswith("addr") and current_iface:
+                    current_iface["mac"] = line.split()[1]
+    return interfaces
 
-    # 启动扫描 (全频段)
-    print(f"[*] Starting scan on: {target_iface}...")
-    cmd = f"airodump-ng {target_iface} --band abg --write {OUTPUT_PREFIX} --output-format csv --write-interval 1 > /dev/null 2>&1 &"
-    os.system(cmd)
 
-    print(json.dumps({"status": "started", "interface": target_iface}))
-    sys.stdout.flush()
+def scan_networks(interface=None):
+    """执行深度扫描"""
+    networks = []
+    print(f"[*] Starting scan on interface: {interface or 'Auto'}...")
+
+    try:
+        # nmcli 命令
+        cmd = ["nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY,RATE", "dev", "wifi", "list"]
+        if interface:
+            cmd.extend(["ifname", interface])
+
+        output = subprocess.check_output(cmd).decode('utf-8')
+
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line: continue
+
+            parts = line.split(':')
+            if len(parts) >= 5:
+                rate = parts[-1]
+                sec = parts[-2]
+                sig = parts[-3]
+                chan = parts[-4]
+
+                if len(parts) >= 10:
+                    bssid = ":".join(parts[-10:-4])
+                    ssid = line.split(bssid)[0].strip(':')
+                else:
+                    bssid = "Unknown"
+                    ssid = parts[0]
+
+                if not ssid: ssid = "<Hidden>"
+
+                try:
+                    signal_val = int(sig)
+                    dbm = int((signal_val / 2) - 100) if signal_val > 0 else -100
+                except:
+                    dbm = -80
+
+                try:
+                    channel = int(chan)
+                except:
+                    channel = 1
+
+                networks.append({
+                    "ssid": ssid,
+                    "bssid": bssid,
+                    "channel": channel,
+                    "signal": dbm,
+                    "encryption": sec,
+                    "vendor": get_vendor(bssid),
+                    "band": get_band(channel),
+                    "rate": rate,
+                    "clients": -1  # 预留给 Airodump
+                })
+    except Exception as e:
+        print(f"[!] Scan Error: {e}")
+        return []
+
+    return networks
 
 
-def parse_loop():
-    csv_file = f"{OUTPUT_PREFIX}-01.csv"
-    for i in range(10):
-        if os.path.exists(csv_file): break
-        time.sleep(1)
+def main():
+    # 1. 获取网卡
+    ifaces = get_kali_interfaces()
+    print(f"[*] Detected Interfaces: {ifaces}")
 
-    while True:
-        if os.path.exists(csv_file):
-            aps = {}
-            clients_count = {}
+    # 2. 自动选择最佳网卡 (Monitor 优先 -> wlan0)
+    target_iface = None
+    for i in ifaces:
+        if i['mode'] == 'Monitor':
+            target_iface = i['name']
+            break
+    if not target_iface and ifaces:
+        target_iface = ifaces[0]['name']
 
-            try:
-                with open(csv_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.readlines()
+    # 3. 执行扫描
+    results = scan_networks(target_iface)
 
-                section = "AP"  # 标记当前读的是 AP 还是 Client
+    # 4. 回传数据给 C2 后端
+    payload = {
+        "interface": target_iface,
+        "count": len(results),
+        "networks": results,
+        "timestamp": time.time()
+    }
 
-                for line in content:
-                    line = line.strip()
-                    if not line: continue
-
-                    if line.startswith("Station MAC"):
-                        section = "CLIENT"
-                        continue
-                    if line.startswith("BSSID"):
-                        section = "AP"
-                        continue
-
-                    parts = [p.strip() for p in line.split(',')]
-
-                    if section == "AP":
-                        if len(parts) < 14: continue
-                        bssid = parts[0]
-                        # 存储 AP 信息
-                        aps[bssid] = {
-                            "bssid": bssid,
-                            "channel": parts[3],
-                            "encryption": parts[5],
-                            "signal": parts[8],
-                            "ssid": parts[13],
-                            "clients": 0,  # 初始化
-                            "score": 0  # 抓包成功率评分
-                        }
-
-                    elif section == "CLIENT":
-                        if len(parts) < 6: continue
-                        # parts[0] = Client MAC, parts[5] = BSSID (connected AP)
-                        client_mac = parts[0]
-                        ap_bssid = parts[5]
-
-                        # 统计连接数 (过滤掉未连接的)
-                        if ap_bssid in aps and "not associated" not in ap_bssid:
-                            aps[ap_bssid]["clients"] += 1
-
-                # === 转换成列表并计算评分 ===
-                result_list = []
-                for bssid, info in aps.items():
-                    # 计算抓包成功率/推荐度 (0-100)
-                    # 逻辑：有人连(权重高) + 信号好(权重中) + 加密是WPA(权重低)
-                    score = 0
-
-                    # 1. 在线用户加分 (最重要，没人连抓不到包)
-                    if info["clients"] > 0: score += 50
-                    if info["clients"] > 3: score += 20
-
-                    # 2. 信号加分
-                    try:
-                        sig = int(info["signal"])
-                        if sig > -60:
-                            score += 20
-                        elif sig > -75:
-                            score += 10
-                    except:
-                        pass
-
-                    # 3. 活跃度加分 (通过 Power 变动，这里简化处理)
-
-                    info["score"] = min(score, 100)
-                    result_list.append(info)
-
-                print(json.dumps({"networks": result_list}))
-                sys.stdout.flush()
-
-            except Exception:
-                pass
-        time.sleep(1.5)
+    print(f"[*] Sending {len(results)} networks to C2 Server...")
+    try:
+        # 这里的 endpoint 要对应后端新写的接收接口
+        r = requests.post(CALLBACK_URL, json=payload)
+        print(f"[+] Server Response: {r.status_code}")
+    except Exception as e:
+        print(f"[-] Failed to send data: {e}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 2: INTERFACE = sys.argv[2]
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "scan":
-            start_scan()
-            parse_loop()
-        elif sys.argv[1] == "kill":
-            os.system("killall airodump-ng 2>/dev/null")
-            print(json.dumps({"status": "stopped"}))
-    else:
-        print("Usage: python3 wifi_scanner.py <scan|kill> [interface]")
+    main()
