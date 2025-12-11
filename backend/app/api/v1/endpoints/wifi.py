@@ -25,7 +25,7 @@ scan_complete_event = asyncio.Event()
 
 
 # ==========================================
-# 1. 核心修复：一键部署接口 (之前遗漏的！)
+# 1. 核心修复：一键部署接口 (增强路径查找)
 # ==========================================
 @router.post("/agent/deploy")
 async def deploy_agent_via_ssh():
@@ -42,16 +42,43 @@ async def deploy_agent_via_ssh():
             return {"status": "error", "message": "SSH 连接失败，请检查 .env 配置或网络"}
 
     # 2. 智能定位 Payload 脚本路径 (修复路径查找问题)
-    # 无论你在 backend 目录还是根目录启动，都能找到
-    base_path = Path(__file__).resolve().parent.parent.parent.parent.parent  # 回退到项目根目录
-    payload_path = base_path / "kali_payloads" / "wifi_scanner.py"
+    # 获取当前文件 (wifi.py) 的绝对路径
+    current_file = Path(__file__).resolve()
 
-    if not payload_path.exists():
-        # 尝试另一种常见路径结构 (开发环境/Docker环境差异)
-        payload_path = Path("kali_payloads/wifi_scanner.py")
+    # 定义可能的路径列表，逐一尝试
+    possible_paths = [
+        # 1. 标准结构：Project/backend/app/api/v1/endpoints/wifi.py -> Project/kali_payloads
+        # 需要向上回退 6 层到达 Project Root
+        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",
 
-    if not payload_path.exists():
-        return {"status": "error", "message": f"服务端找不到 wifi_scanner.py 文件，路径: {payload_path}"}
+        # 2. 备用结构：如果 kali_payloads 被放进了 backend
+        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",
+
+        # 3. 相对运行目录：假设从 backend 目录启动 (python main.py) -> ../kali_payloads
+        Path.cwd().parent / "kali_payloads" / "wifi_scanner.py",
+
+        # 4. 相对运行目录：假设从项目根目录启动 -> kali_payloads
+        Path.cwd() / "kali_payloads" / "wifi_scanner.py",
+
+        # 5. 绝对硬编码 (根据报错信息猜测的最后防线，如果你的项目在 backend 下还有一层)
+        Path.cwd() / "../kali_payloads/wifi_scanner.py"
+    ]
+
+    payload_path = None
+    for p in possible_paths:
+        # ypath = p.resolve() # 解析为绝对路径
+        if p.exists():
+            payload_path = p
+            print(f"[DEBUG] 成功定位 Payload: {payload_path}")
+            break
+        else:
+            print(f"[DEBUG] 尝试路径失败: {p}")
+
+    if not payload_path:
+        # 打印出所有尝试过的路径，方便调试
+        msg = f"服务端找不到 wifi_scanner.py。当前工作目录: {Path.cwd()}。已尝试路径: {[str(p) for p in possible_paths]}"
+        print(f"[!] {msg}")
+        return {"status": "error", "message": msg}
 
     try:
         # 3. 上传脚本
@@ -66,11 +93,11 @@ async def deploy_agent_via_ssh():
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
 
-        # 获取 Docker 宿主机 IP (如果是 Docker 环境)
+        # 增强获取 IP 逻辑 (Docker/虚拟机环境下 localhost 可能不对)
         if local_ip.startswith("127."):
-            # 尝试获取局域网 IP
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # 连接一个公网IP不需要真实发送数据，只是为了选路
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
                 s.close()
@@ -97,7 +124,7 @@ async def deploy_agent_via_ssh():
 
 
 # ==========================================
-# 2. 核心修复：获取网卡接口 (之前遗漏的！)
+# 2. 核心修复：获取网卡接口
 # ==========================================
 @router.get("/interfaces")
 async def get_interfaces():
@@ -106,7 +133,6 @@ async def get_interfaces():
     is_online = (time.time() - c2_state['last_heartbeat']) < 15
 
     if not c2_state['interfaces'] or not is_online:
-        # 返回 waiting 状态，前端会根据这个显示“重连”按钮
         return {"interfaces": [{"name": "waiting", "display": "Agent 离线", "is_wireless": False}]}
 
     return {"interfaces": c2_state['interfaces']}
@@ -252,6 +278,7 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                 else:
                     existing.packet_count = int(item.get('packets', 0))
                     existing.signal = int(item.get('power', 0))
+                    existing.last_seen = datetime.utcnow()  # 更新活跃时间
             db.commit()
 
         # 2. 深度扫描数据入库
@@ -271,8 +298,15 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                     ))
                 else:
                     new_probed = item.get('probed')
+                    # 只有当新数据包含更多探测记录时才更新，防止覆盖为空
                     if new_probed and len(new_probed) > len(existing.probed_essids or ""):
                         existing.probed_essids = new_probed
+
+                    # 更新信号和频道
+                    existing.signal = int(item.get('power', 0))
+                    if item.get('channel'):
+                        existing.capture_channel = int(item.get('channel'))
+                    existing.last_seen = datetime.utcnow()
             db.commit()
 
     return {"status": "received"}
