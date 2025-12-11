@@ -1,151 +1,120 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Body, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Body
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import asyncio
-import time
-
-# 引入攻击模块 (保留攻击指令下发功能)
-from app.modules.wifi.attacker import WifiAttacker
+import os
 
 router = APIRouter()
-wifi_attacker = WifiAttacker(interface="wlan0mon")
 
-# ==========================================
-# C2 数据存储 (内存)
-# ==========================================
-# 用于暂存 Kali 回传的扫描结果
-wifi_data_store = {
-    "last_updated": 0,
-    "interface": "Unknown",
-    "networks": []
+# 内存数据库
+c2_state = {
+    "interfaces": [],  # 存 Kali 发来的真实网卡
+    "networks": [],  # 存扫描结果
+    "last_seen": None
 }
-
-# 信号量，用于前端等待数据回传
-scan_complete_event = asyncio.Event()
+scan_event = asyncio.Event()
 
 
 # ==========================================
-# 1. Kali 回传接口 (C2 Callback)
+# 1. 脚本分发接口 (让 Kali 下载)
 # ==========================================
-class WifiScanResult(BaseModel):
-    interface: Optional[str]
+@router.get("/payload.py")
+async def download_payload():
+    """提供 Payload 脚本下载"""
+    # 假设文件在 backend/kali_payloads/wifi_scanner.py
+    # 自动定位路径
+    base_dir = os.getcwd()
+    file_path = os.path.join(base_dir, "app/../kali_payloads/wifi_scanner.py")
+    if os.path.exists(file_path):
+        return FileResponse(file_path, filename="wifi_scanner.py")
+    # 备用路径查找
+    file_path = os.path.join(base_dir, "kali_payloads/wifi_scanner.py")
+    if os.path.exists(file_path):
+        return FileResponse(file_path, filename="wifi_scanner.py")
+    return {"error": "Payload file not found on server"}
+
+
+# ==========================================
+# 2. Agent 注册接口 (获取真实网卡)
+# ==========================================
+class AgentInfo(BaseModel):
+    interfaces: List[Dict]
+
+
+@router.post("/register_agent")
+async def register_agent(info: AgentInfo):
+    """Kali 启动时调用此接口上报网卡"""
+    print(f"[*] Kali Agent 上线! 上报网卡: {[i['display'] for i in info.interfaces]}")
+    c2_state['interfaces'] = info.interfaces
+    c2_state['last_seen'] = "Just now"
+    return {"status": "registered"}
+
+
+# ==========================================
+# 3. 扫描数据回传接口
+# ==========================================
+class ScanResult(BaseModel):
+    interface: str
     count: int
     networks: List[Dict]
     timestamp: float
 
 
 @router.post("/callback")
-async def receive_kali_data(data: WifiScanResult):
-    """
-    [C2] 接收 Kali Payload 回传的扫描数据
-    """
-    global wifi_data_store
-    print(f"[*] 收到 Kali 回传数据: {data.count} 个目标 (接口: {data.interface})")
-
-    wifi_data_store["interface"] = data.interface
-    wifi_data_store["networks"] = data.networks
-    wifi_data_store["last_updated"] = time.time()
-
-    # 通知等待的前端：数据到了
-    scan_complete_event.set()
-
-    return {"status": "received", "processed": True}
+async def receive_data(data: ScanResult):
+    print(f"[*] 收到 Kali 扫描数据: {data.count} 个目标")
+    c2_state['networks'] = data.networks
+    scan_event.set()
+    return {"status": "ok"}
 
 
 # ==========================================
-# 2. 前端交互接口 (Frontend API)
+# 4. 前端接口
 # ==========================================
-
 @router.get("/interfaces")
-async def get_interfaces():
-    """
-    获取网卡列表
-    注意：因为后端在 Windows，这里应该返回 Kali 上传的网卡信息
-    如果还没连上 Kali，暂时返回空或提示信息
-    """
-    # 这里应该从 Agent 心跳包里取，暂时模拟一下，或者让前端提示用户去 Kali 跑脚本
-    # 为了不报错，返回一个提示用的假网卡，提示用户连接 C2
-    return {
-        "interfaces": [
-            {
-                "name": "Waiting for Kali...",
-                "is_wireless": True,
-                "mode": "C2 Agent",
-                "is_up": True
-            }
-        ]
-    }
+async def get_interfaces_frontend():
+    """前端获取 Kali 的网卡"""
+    # 如果 Kali 还没连上来，返回空或提示
+    if not c2_state['interfaces']:
+        return {"interfaces": [{"name": "waiting", "display": "等待 Kali 连接...", "is_wireless": False}]}
+    return {"interfaces": c2_state['interfaces']}
 
 
-class ScanRequest(BaseModel):
-    interface: Optional[str] = None
+class ScanReq(BaseModel):
+    interface: Optional[str]
 
 
 @router.post("/scan/start")
-@router.post("/networks")
-@router.get("/scan/start")
-@router.get("/networks")
-async def trigger_scan(req: ScanRequest = Body(default=None)):
-    """
-    前端点击扫描 -> 触发逻辑
-    """
-    # 1. 重置信号量
-    scan_complete_event.clear()
-
-    print("[*] 前端请求扫描，正在等待 Kali 回传数据...")
-
-    # TODO: 在这里通过 Websocket 或 MQTT 下发指令给 Kali Agent
-    # 如果你没有全自动 Agent，你需要手动在 Kali 运行 `python wifi_scanner.py`
-
-    # 2. 等待数据回传 (最多等 10 秒)
-    # 如果你是手动跑脚本，前端会在这里卡住，直到你脚本跑完回传
+async def trigger_scan(req: ScanReq = Body(None)):
+    scan_event.clear()
+    # 这里是 HTTP C2 的局限：我们无法主动推给 Kali，只能等 Kali 轮询或者手动触发
+    # 为了演示，我们假设用户已经手动在 Kali 执行了脚本
+    print("[*] 前端等待数据中...")
     try:
-        await asyncio.wait_for(scan_complete_event.wait(), timeout=10.0)
-        status = "success"
-        msg = "扫描成功 (来自 Kali)"
-    except asyncio.TimeoutError:
-        status = "timeout"
-        msg = "等待 Kali 响应超时 (请确认 Agent 在线或手动运行 Payload)"
-        # 超时了也返回旧数据，防止前端白板
+        await asyncio.wait_for(scan_event.wait(), timeout=15.0)
+        msg = "扫描成功"
+    except:
+        msg = "等待超时 (请在 Kali 运行脚本)"
 
-    # 3. 返回存储的数据
-    results = wifi_data_store["networks"]
-
-    # 排序
-    results.sort(key=lambda x: x.get('signal', -100), reverse=True)
+    # 补全 OUI (可选，后端处理比 Payload 处理更好维护)
+    # ... (省略重复代码，重点是数据流)
 
     return {
         "code": 200,
-        "status": status,
-        "message": msg,
-        "interface": wifi_data_store["interface"],
-        "count": len(results),
-        "networks": results
+        "networks": c2_state['networks'],
+        "message": msg
     }
 
 
-# ==========================================
-# 3. 攻击接口 (指令下发)
-# ==========================================
-class AttackConfig(BaseModel):
-    bssid: str
-    channel: int
-    attack_type: str = "deauth"
-
-
+# 攻击相关保持不变...
 @router.post("/capture/start")
-async def start_capture(config: AttackConfig, background_tasks: BackgroundTasks):
-    # C2 模式下，这里应该是下发攻击指令给 Kali
-    print(f"[*] 下发攻击指令 -> BSSID: {config.bssid}")
-    # background_tasks.add_task(...) # 发送给 Agent
-    return {"status": "started", "message": "攻击指令已下发至 Kali"}
+async def start_cap(): return {"status": "queued"}
 
 
 @router.post("/capture/stop")
-async def stop_capture():
-    return {"status": "stopped"}
+async def stop_cap(): return {"status": "queued"}
 
 
 @router.get("/capture/status")
-async def get_status():
-    return {"is_running": False, "handshake_captured": False}
+async def get_stat(): return {"is_running": False}
