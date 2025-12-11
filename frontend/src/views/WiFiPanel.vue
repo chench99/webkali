@@ -4,10 +4,10 @@
     <div class="panel-header flex justify-between items-end mb-6 border-b border-gray-700 pb-4">
       <div>
         <h2 class="text-2xl font-bold flex items-center gap-3 text-blue-400">
-          <span class="text-3xl">🐉</span> Kali 无线渗透 C2 控制台 <span class="text-sm text-gray-500 font-normal border border-gray-600 px-2 rounded">v4.0 PRO</span>
+          <span class="text-3xl">🐉</span> Kali 无线渗透 C2 控制台 <span class="text-sm text-gray-500 font-normal border border-gray-600 px-2 rounded">v5.0 PRO</span>
         </h2>
         <div class="text-gray-500 text-xs mt-1">
-          C2 架构 | 远程指令下发 | 分布式扫描
+          混合架构 | 远程指令下发 | 分布式扫描
         </div>
       </div>
 
@@ -20,8 +20,8 @@
         
         <div class="flex items-center gap-2 border-l border-gray-600 pl-4">
           <span class="text-gray-400">Kali Agent:</span>
-          <span :class="interfaces.length > 0 && interfaces[0].name !== 'waiting' ? 'text-green-400 font-bold' : 'text-red-400 animate-pulse'">
-            {{ interfaces.length > 0 && interfaces[0].name !== 'waiting' ? '已连接' : '等待接入...' }}
+          <span :class="hasAgent ? 'text-green-400 font-bold' : 'text-red-400 animate-pulse'">
+            {{ hasAgent ? '已连接' : '等待接入...' }}
           </span>
         </div>
 
@@ -31,7 +31,7 @@
         </div>
         
         <div class="flex items-center gap-2 border-l border-gray-600 pl-4">
-          <span class="text-gray-400">Server CPU:</span>
+          <span class="text-gray-400">CPU 负载:</span>
           <span :class="getLoadClass(systemStatus.cpu_percent)">{{ systemStatus.cpu_percent || 0 }}%</span>
         </div>
       </div>
@@ -52,14 +52,14 @@
               {{ iface.display || iface.name }} [{{ iface.mode || 'Managed' }}]
             </option>
           </select>
-          <button @click="fetchInterfaces" title="刷新 Kali 网卡列表" class="text-gray-400 hover:text-white px-2 transition-transform hover:rotate-180">↻</button>
+          <button @click="fetchInterfaces" title="刷新列表" class="text-gray-400 hover:text-white px-2 transition-transform hover:rotate-180">↻</button>
         </div>
 
         <a 
           href="/api/v1/wifi/payload.py" 
           target="_blank" 
-          class="text-xs text-blue-400 underline hover:text-blue-300 flex items-center gap-1"
-          title="下载此脚本到 Kali 运行以连接 C2"
+          class="text-xs text-blue-400 underline hover:text-blue-300 flex items-center gap-1 ml-2"
+          title="下载脚本到 Kali 运行"
         >
           <span>📥</span> 下载 Payload
         </a>
@@ -94,17 +94,15 @@
       <table class="w-full text-left text-sm">
         <thead class="bg-gray-900 text-gray-400 uppercase tracking-wider">
           <tr>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('ssid')">ESSID ⇅</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('bssid')">BSSID (MAC) ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('ssid')">ESSID ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('bssid')">BSSID (MAC) ⇅</th>
             <th class="p-4 border-b border-gray-700">设备厂商</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('channel')">信道/频段 ⇅</th>
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('encryption')">加密 ⇅</th>
-            
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('channel')">信道 ⇅</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('encryption')">加密 ⇅</th>
             <th class="p-4 border-b border-gray-700 font-bold text-blue-400">在线终端</th>
-            
-            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white transition-colors" @click="sortBy('signal')">信号 ⇅</th>
-            <th class="p-4 border-b border-gray-700">威胁情报</th>
-            <th class="p-4 text-right border-b border-gray-700">渗透操作</th>
+            <th class="p-4 border-b border-gray-700 cursor-pointer hover:text-white" @click="sortBy('signal')">信号 ⇅</th>
+            <th class="p-4 border-b border-gray-700">情报分析</th>
+            <th class="p-4 text-right border-b border-gray-700">操作</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-700">
@@ -114,86 +112,47 @@
               <div v-if="!hasAgent" class="flex flex-col items-center gap-2">
                 <div class="text-4xl">🔌</div>
                 <div class="font-bold text-red-400">Agent 未连接</div>
-                <div class="text-sm">请在 Kali 中运行 payload.py 并连接到此服务器</div>
+                <div class="text-sm">请点击上方“下载 Payload”并在 Kali 中运行</div>
               </div>
               <div v-else class="flex flex-col items-center gap-2">
                 <div class="text-4xl">📡</div>
-                <div>暂无扫描数据，请点击右上角执行扫描</div>
+                <div>暂无数据，请点击“执行全频段扫描”</div>
               </div>
             </td>
           </tr>
 
           <tr v-if="filteredNetworks.length === 0 && isScanning">
              <td colspan="9" class="p-12 text-center text-blue-400 animate-pulse">
-               正在等待 Kali Agent 回传数据... (超时时间 15s)
+               正在等待 Kali Agent 回传数据... (C2 通信中)
              </td>
           </tr>
 
-          <tr 
-            v-for="(net, index) in filteredNetworks" 
-            :key="index" 
-            class="hover:bg-gray-700 transition-colors group"
-          >
-            <td class="p-4 font-bold text-white group-hover:text-blue-300 transition-colors">
-              {{ net.ssid || '<Hidden>' }}
-            </td>
-            
-            <td class="p-4 text-gray-400 font-mono text-xs select-all">
-              {{ net.bssid }}
-            </td>
-            
-            <td class="p-4 text-gray-300 text-xs">
-              {{ net.vendor || 'Unknown' }}
-            </td>
-            
+          <tr v-for="(net, index) in filteredNetworks" :key="index" class="hover:bg-gray-700 transition-colors group">
+            <td class="p-4 font-bold text-white group-hover:text-blue-300 transition-colors">{{ net.ssid || '<Hidden>' }}</td>
+            <td class="p-4 text-gray-400 font-mono text-xs select-all">{{ net.bssid }}</td>
+            <td class="p-4 text-gray-300 text-xs">{{ net.vendor || 'Unknown' }}</td>
             <td class="p-4">
               <div class="flex flex-col">
                 <span class="text-white font-bold text-xs">CH {{ net.channel }}</span>
                 <span class="text-xs text-gray-500 scale-90 origin-left">{{ net.band || '2.4G' }}</span>
               </div>
             </td>
+            <td class="p-4"><span class="px-2 py-0.5 rounded text-xs font-bold border" :class="getEncClass(net.encryption)">{{ net.encryption }}</span></td>
             
-            <td class="p-4">
-              <span 
-                class="px-2 py-0.5 rounded text-xs font-bold border" 
-                :class="getEncClass(net.encryption)"
-              >
-                {{ net.encryption }}
-              </span>
-            </td>
-
             <td class="p-4 text-xs font-mono">
-              <span v-if="net.clients >= 0" class="text-green-400 font-bold bg-green-900/20 px-2 py-0.5 rounded">
-                {{ net.clients }} 台
-              </span>
-              <span v-else class="text-gray-500 border border-gray-600 px-1 rounded cursor-help" title="普通扫描无法获取终端数，请开启 Monitor 模式嗅探">
-                🔍 需监听
-              </span>
+              <span v-if="net.clients >= 0" class="text-green-400 font-bold bg-green-900/20 px-2 py-0.5 rounded">{{ net.clients }} 台</span>
+              <span v-else class="text-gray-500 border border-gray-600 px-1 rounded cursor-help" title="需开启监听模式获取">🔍 需监听</span>
             </td>
             
             <td class="p-4">
               <div class="w-24 bg-gray-900 rounded-full h-1.5 mt-1 overflow-hidden">
-                <div 
-                  class="h-full transition-all duration-500" 
-                  :class="getSignalColor(net.signal)" 
-                  :style="{ width: getSignalPercent(net.signal) + '%' }"
-                ></div>
+                <div class="h-full transition-all duration-500" :class="getSignalColor(net.signal)" :style="{ width: getSignalPercent(net.signal) + '%' }"></div>
               </div>
-              <div class="text-xs text-gray-500 mt-1 flex justify-between w-24">
-                <span>{{ net.signal }} dBm</span>
-                <span>{{ getSignalPercent(net.signal) }}%</span>
-              </div>
+              <div class="text-xs text-gray-500 mt-1 flex justify-between w-24"><span>{{ net.signal }} dBm</span><span>{{ getSignalPercent(net.signal) }}%</span></div>
             </td>
-            
-            <td class="p-4">
-              <span v-html="getIntelligence(net)"></span>
-            </td>
-            
+            <td class="p-4"><span v-html="getIntelligence(net)"></span></td>
             <td class="p-4 text-right">
-              <button 
-                class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-xs transition-colors shadow hover:shadow-red-500/50 flex items-center gap-1 ml-auto" 
-                @click="attackTarget(net)"
-              >
+              <button class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-xs transition-colors shadow hover:shadow-red-500/50 flex items-center gap-1 ml-auto" @click="attackTarget(net)">
                 <span>☠️</span> 攻击
               </button>
             </td>
@@ -223,23 +182,16 @@ export default {
     };
   },
   computed: {
-    // 判断是否有有效的 Kali Agent 连接
+    // 检查是否有真实 Agent 在线 (排除 waiting 占位符)
     hasAgent() {
       return this.interfaces.length > 0 && this.interfaces[0].name !== 'waiting';
     },
-    // 过滤 + 排序逻辑
     filteredNetworks() {
       let result = this.networks;
-      // 1. 搜索过滤
       if (this.searchQuery) {
         const q = this.searchQuery.toLowerCase();
-        result = result.filter(n => 
-          (n.ssid && n.ssid.toLowerCase().includes(q)) || 
-          (n.bssid && n.bssid.toLowerCase().includes(q)) || 
-          (n.vendor && n.vendor.toLowerCase().includes(q))
-        );
+        result = result.filter(n => (n.ssid && n.ssid.toLowerCase().includes(q)) || (n.bssid && n.bssid.toLowerCase().includes(q)) || (n.vendor && n.vendor.toLowerCase().includes(q)));
       }
-      // 2. 排序逻辑
       result = result.sort((a, b) => {
         let valA = a[this.sortKey]; let valB = b[this.sortKey];
         if (typeof valA === 'string') { valA = valA.toLowerCase(); valB = valB.toLowerCase(); }
@@ -251,32 +203,25 @@ export default {
   mounted() {
     this.fetchSystemStatus();
     this.fetchInterfaces(); 
-    // 每3秒刷新一次状态，检查 Agent 是否上线
+    // 定时刷新状态，感知 Agent 上线
     this.statusTimer = setInterval(() => {
         this.fetchSystemStatus();
-        // 如果网卡列表是空的或者还在等待，尝试刷新
         if (!this.hasAgent) this.fetchInterfaces();
     }, 3000);
   },
-  beforeDestroy() {
-    if (this.statusTimer) clearInterval(this.statusTimer);
-  },
+  beforeDestroy() { if (this.statusTimer) clearInterval(this.statusTimer); },
   methods: {
-    // 1. 获取系统状态
-    async fetchSystemStatus() {
-      try { const res = await axios.get('/api/v1/system/status'); if (res.data) this.systemStatus = res.data; } catch (e) {}
-    },
+    async fetchSystemStatus() { try { const res = await axios.get('/api/v1/system/status'); if (res.data) this.systemStatus = res.data; } catch (e) {} },
     
-    // 2. 获取 Agent 网卡列表
     async fetchInterfaces() {
       try {
         const res = await axios.get('/api/v1/wifi/interfaces');
         if (res.data && res.data.interfaces) {
-          const newInterfaces = res.data.interfaces;
-          // 只有当数据变化时才更新，防止下拉框闪烁
-          if (JSON.stringify(newInterfaces) !== JSON.stringify(this.interfaces)) {
-             this.interfaces = newInterfaces;
-             // 自动选中逻辑: 优先 Monitor, 其次 wlan0, 排除 waiting
+          const newIfaces = res.data.interfaces;
+          // 仅当数据变化时更新
+          if (JSON.stringify(newIfaces) !== JSON.stringify(this.interfaces)) {
+             this.interfaces = newIfaces;
+             // 自动选中逻辑
              if (this.hasAgent && !this.selectedInterface) {
                  const monitor = this.interfaces.find(i => i.mode === 'Monitor');
                  const wireless = this.interfaces.find(i => i.is_wireless);
@@ -286,47 +231,38 @@ export default {
              }
           }
         }
-      } catch (error) {
-        console.error("Agent 通信失败", error);
-      }
+      } catch (error) { console.error("API Error", error); }
     },
 
-    // 3. 触发 C2 扫描
     async startScan() {
-      if (!this.selectedInterface) {
-        alert("请先选择一个 Kali 网卡！");
-        return;
-      }
+      if (!this.selectedInterface) { alert("请先选择 Kali 网卡！"); return; }
       this.isScanning = true;
       try {
-        // 请求 C2 触发扫描，这个请求会 pending 直到 Kali 回传数据
         const payload = { interface: this.selectedInterface };
         const res = await axios.post('/api/v1/wifi/scan/start', payload);
         
         if (res.data.status === 'timeout') {
-            this.$message?.error("扫描超时：Kali Agent 未响应。请检查 Payload 是否在运行。");
+            this.$message?.error("扫描超时：Agent 未响应。请确保 payload.py 正在运行。");
         } else {
             if (res.data.networks) this.networks = res.data.networks;
             this.$message?.success(`Agent 回传成功: 更新 ${this.networks.length} 个目标`);
         }
       } catch (error) {
         console.error("Scan Error:", error);
-        alert("C2 通信错误: " + (error.response?.data?.detail || error.message));
+        alert("请求失败: " + (error.response?.data?.detail || error.message));
       } finally {
         this.isScanning = false;
       }
     },
     
-    // 4. 攻击指令
     async attackTarget(net) {
       if(!confirm(`⚠️ 确认下发攻击指令?\n目标: ${net.ssid} (${net.bssid})\nAgent 将执行 Deauth 攻击。`)) return;
       try {
         await axios.post('/api/v1/wifi/capture/start', { bssid: net.bssid, channel: net.channel });
-        alert("✅ 指令已进入 C2 队列");
-      } catch(e) { alert("指令下发失败: " + e.message); }
+        alert("✅ 指令已下发");
+      } catch(e) { alert("指令失败: " + e.message); }
     },
     
-    // 5. 辅助函数
     sortBy(key) { if (this.sortKey === key) this.sortOrder *= -1; else { this.sortKey = key; this.sortOrder = 1; } },
     
     getEncClass(enc) {
