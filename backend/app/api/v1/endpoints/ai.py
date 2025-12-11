@@ -25,6 +25,5 @@ async def chat_with_ai(req: ChatRequest):
     # 这样前端可以通过 response.data.result 拿到数据
     return {
         "code": 200,
-        "status": "success",
-        "result": answer_text 
+        "result": answer_text  # 必须叫 result，配合前端
     }
