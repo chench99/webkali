@@ -65,70 +65,72 @@ Kali-C2-Platform/
   4. **不存在则上传** `backend/kali_payloads/wifi_scanner.py`。
   5. 检查进程，未运行则执行 `nohup python3 wifi_scanner.py &`。
 
-### ✅ 3.2. C2 扫描闭环 (HTTP 异步)
+- [ ] ### ✅ 3.2. C2 扫描闭环 (双频审计 / HTTP 异步)
 
-- **场景**: 用户在前端点击“扫描”。
-- **流程**:
-  1. **前端**: `POST /wifi/scan/start` (带 `interface`)。
-  2. **后端**:
-     - **不执行扫描**。
-     - 将任务标记为 `current_task = 'scan'`。
-     - 进入 `asyncio.Event.wait()` 阻塞状态。
-  3. **Kali Agent**:
-     - 死循环每 2 秒访问 `GET /agent/heartbeat`。
-     - 领到 `scan` 任务。
-     - 调用 `nmcli/iw` 扫描。
-     - 结果 `POST` 回传至 `/callback`。
-  4. **后端**: 收到回调 -> 存入内存 `c2_state` -> 解除阻塞。
-  5. **前端**: 收到响应 -> 渲染列表 (包含“在线终端”列)。
+  - **场景**: 用户在前端点击“扫描”。
+  - **流程**:
+    1. **前端**: `POST /wifi/scan/start` (带 `interface`)。
+    2. **后端**:
+       - **不执行扫描**。
+       - 将任务标记为 `current_task = 'scan'`。
+       - 进入 `asyncio.Event.wait()` 阻塞状态。
+    3. **Kali Agent**:
+       - 死循环每 2 秒访问 `GET /agent/heartbeat`。
+       - 领到 `scan` 任务。
+       - **执行升级版扫描**: `airodump-ng --band abg` (覆盖 2.4G/5G)。
+       - **解析 Station**: 统计每个 AP 的在线客户端数量。
+       - 结果 `POST` 回传至 `/callback`。
+    4. **后端**: 收到回调 -> 存入内存 `c2_state` -> 解除阻塞。
+    5. **前端**: 收到响应 -> 渲染列表 (包含“在线终端”列)。
 
-### ✅ 3.3. 强攻模式 (SSH 同步)
+  ### ✅ 3.3. 强攻模式 (SSH 同步)
+  （保持不变，略）
 
-- **场景**: Deauth 攻击 / 部署钓鱼热点。
-- **流程**:
-  1. **前端**: `POST /attack/eviltwin/start`。
-  2. **后端**:
-     - `ssh_manager` 建立连接。
-     - 定位本地 `kali_payloads/fake_ap.py`。
-     - SFTP 上传至 Kali `/tmp/`。
-     - 执行 `chmod +x` 并 `nohup` 运行。
-  3. **反馈**: 立即返回 `PID` 或日志路径。
+  ### ✅ 3.4. AI 战术分析
+  （保持不变，略）
 
-### ✅ 3.4. AI 战术分析
+  ### ✅ 3.5. 定向监听与数据持久化 (Targeted Audit)
 
-- **场景**: 目标分析。
-- **流程**:
-  1. **前端**: 发送 SSID/加密方式 给 `/attack/ai/analyze_target`。
-  2. **后端**: `ai_service.py` 组装 Prompt (Mode='attack')。
-  3. **AI**: 输出包含 `<think>` 标签的深度思考过程。
-  4. **前端**: 解析 `<think>`，渲染为灰色思维链区域。
+  - **场景**: 用户点击“查看监听” (Target Monitor) 或“深度扫描”。
+  - **流程**:
+    1. **前端**: `POST /monitor/start` (带 `bssid`, `channel`)。
+    2. **Agent**:
+       - 锁定信道与 BSSID。
+       - 实时解析 CSV 中的 `Station` 部分 (MAC, Power, Packets)。
+       - 构造 `monitor_update` 包，通过心跳回传。
+    3. **后端**:
+       - 识别回调类型 `type='monitor_update'`。
+       - **数据入库**: 使用 `SQLModel` 将客户端数据写入 `TargetedClient` 表。
+       - 若记录存在 (MAC+BSSID 相同)，则更新信号与活跃时间。
 
-------
+  ------
 
-## 4. 🛡️ 关键文件指纹 (Feature Lock)
+  ## 4. 🛡️ 关键文件指纹 (Feature Lock)
 
-**修改代码时，必须确保以下特征不丢失：**
+  **修改代码时，必须确保以下特征不丢失：**
 
-#### `backend/app/api/v1/endpoints/wifi.py`
+  #### `backend/app/api/v1/endpoints/wifi.py`
 
-- [x] **内存数据库**: `c2_state` (存 Agent 网卡/心跳时间)。
-- [x] **心跳接口**: `agent_heartbeat` (分发任务)。
-- [x] **回调接口**: `callback` (接收数据)。
-- [x] **下载接口**: `download_payload` (提供脚本下载)。
+  - [x] **内存数据库**: `c2_state` (存 Agent 网卡/心跳时间)。
+  - [x] **持久化存储**: 处理 `monitor_update` 并写入 MySQL (`TargetedClient`)。
+  - [x] **心跳接口**: `agent_heartbeat` (分发任务)。
+  - [x] **回调接口**: `callback` (接收数据)。
 
-#### `backend/kali_payloads/wifi_scanner.py`
+  #### `backend/kali_payloads/wifi_scanner.py`
 
-- [x] **守护模式**: `while True` 死循环。
-- [x] **真实网卡**: 使用 `iw dev` 或 `ip link` 获取真实驱动名 (如 `rtl88xxau`)。
-- [x] **双模扫描**: 同时支持 `nmcli` (Managed) 和 `iw` (Monitor)。
-- [x] **自动回传**: 必须 POST 回 C2 地址。
+  - [x] **守护模式**: `while True` 死循环。
+  - [x] **5G 支持**: 扫描命令必须包含 `--band abg`。
+  - [x] **客户端解析**: 必须解析 CSV 下半部分的 Station 列表。
+  - [x] **自动回传**: 必须 POST 回 C2 地址。
 
-#### `frontend/src/views/WiFiPanel.vue`
+  #### `frontend/src/views/WiFiPanel.vue`
 
-- [x] **C2 状态栏**: 顶部显示 Server/Agent 在线状态、在线人数。
-- [x] **真实下拉框**: 显示 Agent 上报的网卡 (`wlan0 [Monitor]`)。
-- [x] **全字段列表**: ESSID, BSSID, 厂商, 信道, 加密, **在线终端**, 信号, 情报。
-- [x] **下载链接**: 提供 "下载 Payload" 按钮。
+  - [x] **C2 状态栏**: 顶部显示 Server/Agent 在线状态。
+  - [x] **真实下拉框**: 显示 Agent 上报的网卡 (`wlan0 [Monitor]`)。
+  - [x] **全字段列表**: 必须包含 **在线终端 (Clients)** 和 **频段标识 (5G/2.4G)**。
+  - [x] **监听入库**: 点击“查看监听”后，必须调用 `/monitor/start` 并轮询数据库结果。
+
+  ------
 
 ------
 
