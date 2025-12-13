@@ -14,20 +14,91 @@ router = APIRouter()
 
 # --- C2 状态机 (内存) ---
 c2_state = {
-    "interfaces": [],
-    "current_task": "idle",
-    "task_params": {},
-    "last_heartbeat": 0,
-    "networks": []
+    "interfaces": [],  # Agent 上报的网卡列表
+    "current_task": "idle",  # 当前任务
+    "task_params": {},  # 任务参数
+    "last_heartbeat": 0,  # 上次心跳时间
+    "networks": []  # 扫描结果缓存
 }
 
 scan_complete_event = asyncio.Event()
 
 
-# ... (省略 deploy_agent_via_ssh 和 get_interfaces 代码，保持不变) ...
+# ==========================================
+# 1. 部署与连接管理
+# ==========================================
+
+@router.post("/agent/deploy")
+async def deploy_agent_via_ssh():
+    """[C2] 远程部署接口"""
+    print("[*] 收到 Agent 部署指令...")
+
+    if not ssh_client.client:
+        ssh_client.connect()
+        if not ssh_client.client:
+            return {"status": "error", "message": "SSH 连接失败"}
+
+    # 智能定位 Payload 路径
+    current_file = Path(__file__).resolve()
+    possible_paths = [
+        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",
+        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",
+        Path.cwd() / "kali_payloads" / "wifi_scanner.py",
+        Path.cwd().parent / "kali_payloads" / "wifi_scanner.py"
+    ]
+
+    payload_path = None
+    for p in possible_paths:
+        if p.exists():
+            payload_path = p
+            break
+
+    if not payload_path:
+        return {"status": "error", "message": "服务端找不到 wifi_scanner.py"}
+
+    try:
+        # 上传脚本
+        remote_path = ssh_client.upload_payload(str(payload_path), "wifi_scanner.py")
+        if not remote_path:
+            return {"status": "error", "message": "SFTP 上传失败"}
+
+        # 注入 C2 IP
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except:
+            local_ip = "127.0.0.1"
+
+        ssh_client.exec_command(f"sed -i 's/FIXED_C2_IP = \"\"/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
+
+        # 启动进程
+        ssh_client.exec_command("pkill -f wifi_scanner.py")
+        cmd = f"nohup python3 {remote_path} > /tmp/agent.log 2>&1 &"
+        ssh_client.exec_command(cmd)
+
+        return {"status": "success", "message": "Agent 已启动，等待心跳..."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ⚠️ 之前报 404 就是因为这个接口可能丢失了
+@router.get("/interfaces")
+async def get_interfaces():
+    """[前端调用] 获取 Agent 网卡列表"""
+    # 简单的在线状态判断 (15秒无心跳视为离线)
+    is_online = (time.time() - c2_state['last_heartbeat']) < 15
+
+    if not c2_state['interfaces'] or not is_online:
+        return {"interfaces": [{"name": "waiting", "display": "Agent 离线/等待中...", "is_wireless": False}]}
+
+    return {"interfaces": c2_state['interfaces']}
+
 
 # ==========================================
-# 3. 任务控制接口 (监听/扫描/停止)
+# 2. 任务控制接口
 # ==========================================
 
 class MonitorReq(BaseModel):
@@ -36,26 +107,16 @@ class MonitorReq(BaseModel):
 
 
 @router.post("/monitor/start")
-async def start_target_monitor(req: MonitorReq, db: Session = Depends(get_session)):
-    """[C2] 启动定向监听"""
-    print(f"[*] C2 指令: 锁定监听 {req.bssid} (CH {req.channel})")
-
-    # 1. 清空该 BSSID 的历史监听记录，保证数据新鲜 (可选)
-    # db.exec(delete(TargetedClient).where(TargetedClient.network_bssid == req.bssid))
-    # db.commit()
-
-    # 2. 设置 C2 任务，等待 Agent 拉取
+async def start_target_monitor(req: MonitorReq):
+    """启动定向监听"""
     c2_state['current_task'] = 'monitor_target'
-    c2_state['task_params'] = {
-        'bssid': req.bssid,
-        'channel': req.channel
-    }
+    c2_state['task_params'] = {'bssid': req.bssid, 'channel': req.channel}
     return {"status": "queued", "msg": "监听指令已下发"}
 
 
 @router.post("/monitor/deep")
 async def start_deep_scan(db: Session = Depends(get_session)):
-    """[C2] 启动深度全网扫描"""
+    """启动深度扫描"""
     db.exec(delete(DeepScanClient))
     db.commit()
     c2_state['current_task'] = 'deep_scan'
@@ -65,8 +126,7 @@ async def start_deep_scan(db: Session = Depends(get_session)):
 
 @router.post("/monitor/stop")
 async def stop_all_tasks():
-    """[C2] 停止所有任务"""
-    print("[*] C2 指令: 停止任务")
+    """停止任务"""
     c2_state['current_task'] = 'idle'
     c2_state['task_params'] = {}
     return {"status": "stopped"}
@@ -78,15 +138,13 @@ class ScanReq(BaseModel):
 
 @router.post("/scan/start")
 async def trigger_scan(req: ScanReq = Body(None)):
-    """[C2] 触发普通扫描"""
-    print("[*] C2 指令: 普通扫描请求")
+    """触发普通扫描"""
     scan_complete_event.clear()
-
     c2_state['current_task'] = 'scan'
     c2_state['task_params'] = {'interface': req.interface}
 
     try:
-        # 阻塞等待 Agent 回调 (最长 20s)
+        # 等待 Agent 回调结果
         await asyncio.wait_for(scan_complete_event.wait(), timeout=20.0)
         return {"status": "success", "networks": c2_state['networks']}
     except asyncio.TimeoutError:
@@ -100,7 +158,7 @@ async def get_networks_cache():
 
 
 # ==========================================
-# 4. Agent 交互接口 (核心)
+# 3. Agent 交互接口 (心跳/回调)
 # ==========================================
 
 class AgentInfo(BaseModel):
@@ -109,6 +167,7 @@ class AgentInfo(BaseModel):
 
 @router.post("/register_agent")
 async def register_agent(info: AgentInfo):
+    """Agent 上报网卡状态"""
     c2_state['interfaces'] = info.interfaces
     c2_state['last_heartbeat'] = time.time()
     return {"status": "registered"}
@@ -116,7 +175,7 @@ async def register_agent(info: AgentInfo):
 
 @router.get("/agent/heartbeat")
 async def agent_heartbeat():
-    """Agent 轮询任务"""
+    """Agent 领取任务"""
     c2_state['last_heartbeat'] = time.time()
     if c2_state['current_task'] != 'idle':
         return {
@@ -128,62 +187,49 @@ async def agent_heartbeat():
 
 
 class CallbackData(BaseModel):
-    type: str  # 'scan_result', 'monitor_update', 'deep_update'
+    type: str
     networks: Optional[List[Dict]] = None
-    data: Optional[List[Dict]] = None  # 监听到的客户端列表
+    data: Optional[List[Dict]] = None
 
 
 @router.post("/callback")
 async def agent_callback(payload: CallbackData, db: Session = Depends(get_session)):
-    """处理 Agent 回传数据"""
+    """接收 Agent 数据"""
 
-    # 1. 普通扫描结果
+    # 普通扫描回调
     if payload.type == 'scan_result' and payload.networks is not None:
-        print(f"[*] 收到扫描结果: {len(payload.networks)} 个网络")
         c2_state['networks'] = payload.networks
         c2_state['current_task'] = 'idle'
-        scan_complete_event.set()
+        scan_complete_event.set()  # 解锁扫描等待
         return {"status": "received"}
 
-    # 2. 定向监听数据回传 (入库逻辑)
+    # 监听数据回调 (入库)
     if payload.type == 'monitor_update' and payload.data:
         target_bssid = c2_state['task_params'].get('bssid')
-
         for item in payload.data:
             client_mac = item.get('mac')
             if not client_mac: continue
 
-            # 查询是否已存在记录
             existing = db.exec(select(TargetedClient).where(
                 TargetedClient.client_mac == client_mac,
                 TargetedClient.network_bssid == target_bssid
             )).first()
 
-            # 解析数据
-            try:
-                pkt_cnt = int(item.get('packets', 0))
-            except:
-                pkt_cnt = 0
-            try:
-                sig = int(item.get('power', 0))
-            except:
-                sig = 0
+            pkt = int(item.get('packets', 0))
+            sig = int(item.get('power', 0))
 
             if not existing:
-                # 新增记录
                 db.add(TargetedClient(
                     network_bssid=target_bssid,
                     client_mac=client_mac,
-                    packet_count=pkt_cnt,
+                    packet_count=pkt,
                     signal=sig,
                     last_seen=datetime.utcnow()
                 ))
             else:
-                # 更新活跃状态
-                existing.packet_count = pkt_cnt
+                existing.packet_count = pkt
                 existing.signal = sig
                 existing.last_seen = datetime.utcnow()
-
         db.commit()
         return {"status": "updated"}
 
@@ -191,10 +237,14 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
 
 
 # ==========================================
-# 5. 前端查询接口
+# 4. 前端查询接口
 # ==========================================
+
 @router.get("/monitor/clients/{bssid}")
 async def get_targeted_clients(bssid: str, db: Session = Depends(get_session)):
-    """前端轮询此接口，获取入库的客户端数据"""
-    clients = db.exec(select(TargetedClient).where(TargetedClient.network_bssid == bssid)).all()
-    return clients
+    return db.exec(select(TargetedClient).where(TargetedClient.network_bssid == bssid)).all()
+
+
+@router.get("/monitor/deep_results")
+async def get_deep_scan_results(db: Session = Depends(get_session)):
+    return db.exec(select(DeepScanClient).order_by(DeepScanClient.last_seen.desc()).limit(100)).all()
