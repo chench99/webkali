@@ -9,18 +9,20 @@ import time
 import os
 import asyncio
 from pathlib import Path
+from datetime import datetime
 
 router = APIRouter()
 
 # --- C2 状态机 (内存) ---
 c2_state = {
     "interfaces": [],  # Agent 上报的网卡列表
-    "current_task": None,  # 当前任务: 'scan', 'monitor_target', 'deep_scan'
+    "current_task": "idle",  # 当前任务: 'idle', 'scan', 'monitor_target', 'deep_scan'
     "task_params": {},  # 任务参数
     "last_heartbeat": 0,  # 上次心跳时间
-    "networks": []  # 普通扫描结果缓存
+    "networks": []  # 普通扫描结果缓存 (Array of Dict)
 }
 
+# 异步事件锁，用于扫描时的同步等待
 scan_complete_event = asyncio.Event()
 
 
@@ -41,44 +43,30 @@ async def deploy_agent_via_ssh():
         if not ssh_client.client:
             return {"status": "error", "message": "SSH 连接失败，请检查 .env 配置或网络"}
 
-    # 2. 智能定位 Payload 脚本路径 (修复路径查找问题)
-    # 获取当前文件 (wifi.py) 的绝对路径
+    # 2. 智能定位 Payload 脚本路径
     current_file = Path(__file__).resolve()
+    # 向上寻找项目根目录 (根据你的目录结构，可能需要调整层级)
+    # 假设结构: WebKali/backend/app/api/v1/endpoints/wifi.py
+    # 我们要找: WebKali/backend/kali_payloads/wifi_scanner.py
+    # 或者 WebKali/kali_payloads/wifi_scanner.py
 
-    # 定义可能的路径列表，逐一尝试
+    # 优先尝试 backend 同级目录
     possible_paths = [
-        # 1. 标准结构：Project/backend/app/api/v1/endpoints/wifi.py -> Project/kali_payloads
-        # 需要向上回退 6 层到达 Project Root
-        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",
-
-        # 2. 备用结构：如果 kali_payloads 被放进了 backend
-        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",
-
-        # 3. 相对运行目录：假设从 backend 目录启动 (python main.py) -> ../kali_payloads
-        Path.cwd().parent / "kali_payloads" / "wifi_scanner.py",
-
-        # 4. 相对运行目录：假设从项目根目录启动 -> kali_payloads
-        Path.cwd() / "kali_payloads" / "wifi_scanner.py",
-
-        # 5. 绝对硬编码 (根据报错信息猜测的最后防线，如果你的项目在 backend 下还有一层)
-        Path.cwd() / "../kali_payloads/wifi_scanner.py"
+        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",  # Project Root
+        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",  # Backend Root
+        Path.cwd() / "kali_payloads" / "wifi_scanner.py",  # CWD
+        Path.cwd().parent / "kali_payloads" / "wifi_scanner.py"
     ]
 
     payload_path = None
     for p in possible_paths:
-        # ypath = p.resolve() # 解析为绝对路径
         if p.exists():
             payload_path = p
             print(f"[DEBUG] 成功定位 Payload: {payload_path}")
             break
-        else:
-            print(f"[DEBUG] 尝试路径失败: {p}")
 
     if not payload_path:
-        # 打印出所有尝试过的路径，方便调试
-        msg = f"服务端找不到 wifi_scanner.py。当前工作目录: {Path.cwd()}。已尝试路径: {[str(p) for p in possible_paths]}"
-        print(f"[!] {msg}")
-        return {"status": "error", "message": msg}
+        return {"status": "error", "message": f"服务端找不到 wifi_scanner.py。请检查 kali_payloads 目录。"}
 
     try:
         # 3. 上传脚本
@@ -97,7 +85,6 @@ async def deploy_agent_via_ssh():
         if local_ip.startswith("127."):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                # 连接一个公网IP不需要真实发送数据，只是为了选路
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
                 s.close()
@@ -109,9 +96,7 @@ async def deploy_agent_via_ssh():
         ssh_client.exec_command(f"sed -i 's/FIXED_C2_IP = \"\"/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
 
         # 5. 启动进程 (nohup 后台运行)
-        # 先杀掉旧进程防止冲突
-        ssh_client.exec_command("pkill -f wifi_scanner.py")
-
+        ssh_client.exec_command("pkill -f wifi_scanner.py")  # 杀掉旧进程
         cmd = f"nohup python3 {remote_path} > /tmp/agent.log 2>&1 &"
         print(f"[*] 执行启动命令: {cmd}")
         ssh_client.exec_command(cmd)
@@ -163,11 +148,8 @@ async def start_target_monitor(req: MonitorReq):
 async def start_deep_scan(db: Session = Depends(get_session)):
     """启动深度全网扫描 (先清空表)"""
     print("[*] C2 指令: 开启全网深度扫描")
-
-    # 清空旧数据
     db.exec(delete(DeepScanClient))
     db.commit()
-
     c2_state['current_task'] = 'deep_scan'
     c2_state['task_params'] = {}
     return {"status": "queued", "msg": "深度扫描已启动"}
@@ -187,17 +169,32 @@ class ScanReq(BaseModel):
 
 @router.post("/scan/start")
 async def trigger_scan(req: ScanReq = Body(None)):
-    """普通列表扫描"""
-    print("[*] C2 指令: 普通扫描")
+    """
+    [C2] 触发普通扫描
+    注意：这里不会直接执行扫描，而是设置状态，等待 Agent 领取任务并回调。
+    """
+    print("[*] C2 指令: 普通扫描请求")
+
+    # 1. 重置事件
     scan_complete_event.clear()
+
+    # 2. 设置 C2 状态，等待 Agent 心跳领取
     c2_state['current_task'] = 'scan'
     c2_state['task_params'] = {'interface': req.interface}
 
     try:
-        await asyncio.wait_for(scan_complete_event.wait(), timeout=15.0)
+        # 3. 阻塞等待 Agent 回调 (最长等待 20 秒)
+        print("[*] 等待 Agent 回传扫描结果...")
+        await asyncio.wait_for(scan_complete_event.wait(), timeout=20.0)
+
+        # 4. 收到结果，返回给前端
+        print(f"[*] 扫描完成，返回 {len(c2_state['networks'])} 个结果")
         return {"status": "success", "networks": c2_state['networks']}
+
     except asyncio.TimeoutError:
-        return {"status": "timeout", "message": "扫描超时"}
+        print("[!] 扫描超时")
+        c2_state['current_task'] = 'idle'  # 超时重置
+        return {"status": "timeout", "message": "Agent 响应超时，请检查连接"}
 
 
 @router.get("/networks")
@@ -216,7 +213,7 @@ class AgentInfo(BaseModel):
 
 @router.post("/register_agent")
 async def register_agent(info: AgentInfo):
-    print(f"[*] Agent 上线! 网卡: {[i['display'] for i in info.interfaces]}")
+    # print(f"[*] Agent 上线/心跳: {[i['display'] for i in info.interfaces]}")
     c2_state['interfaces'] = info.interfaces
     c2_state['last_heartbeat'] = time.time()
     return {"status": "registered"}
@@ -224,9 +221,11 @@ async def register_agent(info: AgentInfo):
 
 @router.get("/agent/heartbeat")
 async def agent_heartbeat():
-    """Agent 领取任务"""
+    """Agent 领取任务 (Polling)"""
     c2_state['last_heartbeat'] = time.time()
-    if c2_state['current_task']:
+
+    # 如果有任务，分发给 Agent
+    if c2_state['current_task'] != 'idle':
         return {
             "status": "ok",
             "task": c2_state['current_task'],
@@ -236,27 +235,26 @@ async def agent_heartbeat():
 
 
 class CallbackData(BaseModel):
-    # 兼容多种回调格式
-    type: Optional[str] = None  # 'scan_result', 'monitor_update', 'deep_update'
-    interface: Optional[str] = None
-    count: Optional[int] = 0
-    networks: Optional[List[Dict]] = None
-    data: Optional[List[Dict]] = None  # 新版数据字段
+    type: str  # 'scan_result', 'monitor_update', 'deep_update'
+    networks: Optional[List[Dict]] = None  # 普通扫描结果
+    data: Optional[List[Dict]] = None  # 监听结果
 
 
 @router.post("/callback")
 async def agent_callback(payload: CallbackData, db: Session = Depends(get_session)):
     """接收 Agent 数据"""
 
-    # A. 普通扫描回调
-    if payload.networks is not None:
+    # A. 处理普通扫描结果
+    if payload.type == 'scan_result' and payload.networks is not None:
+        print(f"[*] 收到 Agent 扫描结果: {len(payload.networks)} 个网络")
         c2_state['networks'] = payload.networks
-        scan_complete_event.set()
+        c2_state['current_task'] = 'idle'  # 扫描是一次性任务，完成后重置
+        scan_complete_event.set()  # 解锁 trigger_scan 的等待
         return {"status": "received"}
 
-    # B. 监听/深度扫描回调
+    # B. 处理监听数据 (Target Monitor / Deep Scan)
     if payload.data:
-        # 1. 定向监听数据入库
+        # 1. 定向监听入库
         if payload.type == 'monitor_update':
             bssid = c2_state['task_params'].get('bssid')
             for item in payload.data:
@@ -278,15 +276,15 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                 else:
                     existing.packet_count = int(item.get('packets', 0))
                     existing.signal = int(item.get('power', 0))
-                    existing.last_seen = datetime.utcnow()  # 更新活跃时间
+                    existing.last_seen = datetime.utcnow()
             db.commit()
 
-        # 2. 深度扫描数据入库
+        # 2. 深度扫描入库
         elif payload.type == 'deep_update':
             for item in payload.data:
                 client_mac = item.get('mac')
                 if not client_mac: continue
-
+                # (保持原有逻辑...)
                 existing = db.exec(select(DeepScanClient).where(DeepScanClient.client_mac == client_mac)).first()
                 if not existing:
                     db.add(DeepScanClient(
@@ -298,11 +296,8 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                     ))
                 else:
                     new_probed = item.get('probed')
-                    # 只有当新数据包含更多探测记录时才更新，防止覆盖为空
                     if new_probed and len(new_probed) > len(existing.probed_essids or ""):
                         existing.probed_essids = new_probed
-
-                    # 更新信号和频道
                     existing.signal = int(item.get('power', 0))
                     if item.get('channel'):
                         existing.capture_channel = int(item.get('channel'))
@@ -315,7 +310,6 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
 # ==========================================
 # 5. 前端数据查询接口
 # ==========================================
-
 @router.get("/monitor/clients/{bssid}")
 async def get_targeted_clients(bssid: str, db: Session = Depends(get_session)):
     return db.exec(select(TargetedClient).where(TargetedClient.network_bssid == bssid)).all()
