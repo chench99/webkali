@@ -10,8 +10,20 @@
         <div class="text-gray-500 text-xs mt-2 flex gap-4 font-mono">
           <span>Agent状态: <span :class="hasAgent ? 'text-green-400':'text-red-400'">{{ agentStatusText }}</span></span>
           <span>当前任务: <span class="text-yellow-400">{{ currentTask }}</span></span>
-          <span v-if="monitoringBSSID">正在监听: {{ monitoringBSSID }}</span>
+          <span v-if="monitoringBSSID" class="text-yellow-400 animate-pulse">正在监听: {{ monitoringBSSID }}</span>
         </div>
+      </div>
+      
+      <div>
+        <button 
+          v-if="!hasAgent"
+          class="bg-red-900/30 hover:bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded text-xs font-bold transition flex items-center gap-2"
+          @click="deployAgent"
+          :disabled="isDeploying"
+        >
+          <span v-if="isDeploying" class="animate-spin">🔄</span>
+          {{ isDeploying ? '正在部署 (SSH)...' : '🛠️ 一键部署 Agent' }}
+        </button>
       </div>
     </div>
 
@@ -55,23 +67,36 @@
       <table class="w-full text-left text-sm">
         <thead class="bg-gray-800 text-gray-400 uppercase font-mono text-xs tracking-wider">
           <tr>
-            <th class="p-4">ESSID (名称)</th>
-            <th class="p-4">BSSID (MAC)</th>
-            <th class="p-4">信道/频段</th>
-            <th class="p-4">加密</th>
-            <th class="p-4 text-green-400">在线客户端</th>
-            <th class="p-4">信号强度</th>
+            <th @click="handleSort('ssid')" class="p-4 cursor-pointer hover:text-white transition group select-none">
+              SSID (名称) <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('ssid') }}</span>
+            </th>
+            <th @click="handleSort('bssid')" class="p-4 cursor-pointer hover:text-white transition group select-none">
+              BSSID (MAC) <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('bssid') }}</span>
+            </th>
+            <th @click="handleSort('channel')" class="p-4 cursor-pointer hover:text-white transition group select-none">
+              信道/频段 <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('channel') }}</span>
+            </th>
+            <th @click="handleSort('encryption')" class="p-4 cursor-pointer hover:text-white transition group select-none">
+              加密 <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('encryption') }}</span>
+            </th>
+            <th @click="handleSort('client_count')" class="p-4 cursor-pointer hover:text-white transition group select-none text-green-400">
+              在线客户端 <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('client_count') }}</span>
+            </th>
+            <th @click="handleSort('signal')" class="p-4 cursor-pointer hover:text-white transition group select-none">
+              信号质量 <span class="ml-1 opacity-0 group-hover:opacity-50">{{ sortIcon('signal') }}</span>
+            </th>
             <th class="p-4 text-right">操作</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-700/50">
-          <tr v-if="networks.length === 0" class="text-center text-gray-500">
+          <tr v-if="sortedNetworks.length === 0" class="text-center text-gray-500">
             <td colspan="7" class="p-12">
               暂无数据，请确认 Agent 在线并点击“执行扫描”
             </td>
           </tr>
           
-          <tr v-for="(net, index) in networks" :key="index" class="hover:bg-gray-800/50 transition group">
+          <tr v-for="(net, index) in sortedNetworks" :key="index" class="hover:bg-gray-800/50 transition group">
+            
             <td class="p-4">
               <div class="font-bold text-white">{{ net.ssid }}</div>
             </td>
@@ -110,9 +135,13 @@
             <td class="p-4">
               <div class="flex items-center gap-2">
                 <div class="w-16 bg-gray-700 rounded-full h-1.5 overflow-hidden">
-                  <div class="h-full transition-all" :class="getSignalColor(net.signal)" :style="{ width: getSignalPercent(net.signal) + '%' }"></div>
+                  <div 
+                    class="h-full transition-all duration-500 ease-out" 
+                    :class="getSignalColor(net.signal)" 
+                    :style="{ width: getSignalPercent(net.signal) + '%' }"
+                  ></div>
                 </div>
-                <span class="text-xs font-mono w-8 text-right">{{ net.signal }}</span>
+                <span class="text-xs font-mono w-10 text-right">{{ getSignalPercent(net.signal) }}%</span>
               </div>
             </td>
 
@@ -183,22 +212,29 @@
 </template>
 
 <script>
-import api from '@/api' // 使用封装好的 api 实例
+import api from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 export default {
   name: "WiFiPanel",
   data() {
     return {
       isScanning: false,
+      isDeploying: false,
       selectedInterface: "",
       interfaces: [],
       networks: [],
+      
+      // 任务状态
       currentTask: 'idle',
+      monitoringBSSID: null,
+      monitoredClients: [],
       
-      monitoringBSSID: null, // 当前正在监听的 BSSID
-      monitoredClients: [],  // 数据库回传的客户端列表
-      
-      pollTimer: null // 轮询定时器
+      pollTimer: null,
+
+      // 排序状态
+      sortKey: 'signal', // 默认按信号排序
+      sortDesc: true     // 默认降序 (信号强的在前)
     };
   },
   computed: {
@@ -208,11 +244,34 @@ export default {
     agentStatusText() {
       if (!this.hasAgent) return '离线 / 等待连接...';
       return 'ONLINE';
+    },
+    // 排序逻辑
+    sortedNetworks() {
+      return this.networks.slice().sort((a, b) => {
+        let modifier = this.sortDesc ? -1 : 1;
+        
+        // 信号特殊处理 (dBm是负数，越接近0越强)
+        // 比如 -30 > -90
+        if (this.sortKey === 'signal') return (a.signal - b.signal) * modifier;
+        
+        // 在线人数
+        if (this.sortKey === 'client_count') return (a.client_count - b.client_count) * modifier;
+        
+        // 信道
+        if (this.sortKey === 'channel') return (a.channel - b.channel) * modifier;
+        
+        // 字符串字段
+        if (this.sortKey === 'ssid') return a.ssid.localeCompare(b.ssid) * modifier;
+        if (this.sortKey === 'bssid') return a.bssid.localeCompare(b.bssid) * modifier;
+        if (this.sortKey === 'encryption') return a.encryption.localeCompare(b.encryption) * modifier;
+        
+        return 0;
+      });
     }
   },
   mounted() {
     this.fetchInterfaces();
-    this.fetchNetworks(); // 加载上次缓存
+    this.fetchNetworks(); 
     
     // 启动全局轮询 (3秒一次)
     this.pollTimer = setInterval(() => {
@@ -229,7 +288,21 @@ export default {
     if (this.pollTimer) clearInterval(this.pollTimer);
   },
   methods: {
-    // 获取网卡
+    // === 排序处理 ===
+    handleSort(key) {
+      if (this.sortKey === key) {
+        this.sortDesc = !this.sortDesc; // 切换顺序
+      } else {
+        this.sortKey = key;
+        this.sortDesc = true; // 默认降序 (数字大在前)
+      }
+    },
+    sortIcon(key) {
+      if (this.sortKey !== key) return '↕';
+      return this.sortDesc ? '↓' : '↑';
+    },
+
+    // === 基础数据 ===
     async fetchInterfaces() {
       try {
         const res = await api.get('/wifi/interfaces');
@@ -243,7 +316,6 @@ export default {
       } catch (e) {}
     },
 
-    // 获取缓存的网络列表
     async fetchNetworks() {
        if (this.currentTask === 'idle' && !this.isScanning) {
            try {
@@ -253,36 +325,54 @@ export default {
        }
     },
 
-    // [交互] 开始扫描
+    // === 部署逻辑 ===
+    async deployAgent() {
+      this.isDeploying = true;
+      try {
+        const res = await api.post('/wifi/agent/deploy');
+        if (res.data.status === 'success') {
+          ElMessage.success(res.data.message);
+          this.fetchInterfaces();
+        } else {
+          ElMessageBox.alert(res.data.message, '部署失败', {
+            type: 'error',
+            confirmButtonText: '确定'
+          });
+        }
+      } catch (e) {
+        ElMessage.error("请求失败: " + e.message);
+      } finally {
+        this.isDeploying = false;
+      }
+    },
+
+    // === 扫描逻辑 ===
     async startScan() {
       if (!this.selectedInterface) return alert("请先选择网卡");
       
       this.isScanning = true;
-      this.networks = []; // 清空列表，给用户视觉反馈
+      this.networks = []; 
       
       try {
-        // 请求后端触发扫描 (会阻塞10-20秒)
         const res = await api.post('/wifi/scan/start', { interface: this.selectedInterface });
-        
         if (res.data.status === 'success') {
             this.networks = res.data.networks;
-            // 排序：在线人数 > 信号强度
-            this.networks.sort((a, b) => b.client_count - a.client_count || b.signal - a.signal);
+            // 扫描完成后默认按在线人数排序，更直观
+            this.sortKey = 'client_count';
+            this.sortDesc = true;
         } else {
-            alert("扫描失败: " + (res.data.message || '超时'));
+            ElMessage.error("扫描失败: " + (res.data.message || '超时'));
         }
       } catch (e) {
-        alert("请求错误: " + e.message);
+        ElMessage.error("请求错误: " + e.message);
       } finally {
         this.isScanning = false;
-        // 更新一下当前任务状态
         this.currentTask = 'idle';
       }
     },
     
-    // [交互] 开始监听
+    // === 监听逻辑 ===
     async startMonitor(net) {
-      // 乐观更新 UI
       this.monitoringBSSID = net.bssid;
       this.currentTask = 'monitor_target';
       this.monitoredClients = []; 
@@ -294,12 +384,11 @@ export default {
           interface: this.selectedInterface
         });
       } catch (e) {
-        alert("指令下发失败");
+        ElMessage.error("指令下发失败");
         this.stopMonitor();
       }
     },
 
-    // [交互] 停止监听
     async stopMonitor() {
       this.monitoringBSSID = null;
       this.currentTask = 'idle';
@@ -308,7 +397,6 @@ export default {
       } catch (e) {}
     },
 
-    // [数据] 拉取监听数据
     async fetchMonitoredClients() {
       if (!this.monitoringBSSID) return;
       try {
@@ -332,11 +420,16 @@ export default {
       return 'border-gray-600 text-gray-400';
     },
     getSignalPercent(sig) { 
-      return Math.min(100, Math.max(0, (parseInt(sig) + 100) * 2)); 
+      // 将 -100 到 -30 dBm 映射到 0-100%
+      // -30dBm = 100%, -100dBm = 0%
+      const dbm = parseInt(sig);
+      if (dbm <= -100) return 0;
+      if (dbm >= -30) return 100;
+      return Math.round((dbm + 100) * 1.42); 
     },
     getSignalColor(sig) {
       const p = this.getSignalPercent(sig);
-      if (p > 70) return 'bg-green-500';
+      if (p > 75) return 'bg-green-500';
       if (p > 40) return 'bg-yellow-500';
       return 'bg-red-500';
     },

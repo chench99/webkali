@@ -27,7 +27,7 @@ scan_complete_event = asyncio.Event()
 
 
 # ==========================================
-# 1. 智能部署接口 (带诊断)
+# 1. 智能部署接口 (路径修复版)
 # ==========================================
 @router.post("/agent/deploy")
 async def deploy_agent_via_ssh():
@@ -44,21 +44,36 @@ async def deploy_agent_via_ssh():
             print(f"[DEBUG] ❌ SSH 连接失败")
             return {"status": "error", "message": "SSH 连接失败，请检查 .env 配置"}
 
-    # 2. 定位 Payload
-    current_path = Path(__file__).resolve()
-    # 向上寻找 kali_payloads 目录
-    project_root = current_path.parents[4]
-    payload_src = project_root / "kali_payloads" / "wifi_scanner.py"
+    # 2. 智能定位 Payload (修复路径查找逻辑)
+    current_file = Path(__file__).resolve()
+    # /backend/app/api/v1/endpoints/wifi.py
+    # parents[0]=endpoints, [1]=v1, [2]=api, [3]=app, [4]=backend, [5]=项目根目录
 
-    # 兼容性查找：如果层级不对，尝试从当前工作目录找
-    if not payload_src.exists():
-        payload_src = Path("kali_payloads/wifi_scanner.py").resolve()
+    possible_paths = [
+        # 优先级1: 标准结构 (项目根目录/kali_payloads) -> 对应 parents[5]
+        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",
 
-    if not payload_src.exists():
-        print(f"[DEBUG] ❌ 找不到源文件: {payload_src}")
-        return {"status": "error", "message": f"服务端缺失 wifi_scanner.py"}
+        # 优先级2: 放在 backend 下 (backend/kali_payloads) -> 对应 parents[4]
+        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",
 
-    print(f"[DEBUG] 锁定 Payload: {payload_src}")
+        # 优先级3: 相对运行路径
+        Path("kali_payloads/wifi_scanner.py").resolve(),
+        Path("../kali_payloads/wifi_scanner.py").resolve()
+    ]
+
+    payload_src = None
+    for p in possible_paths:
+        if p.exists():
+            payload_src = p
+            print(f"[DEBUG] ✅ 成功定位 Payload: {p}")
+            break
+
+    if not payload_src:
+        # 打印调试信息帮助排查
+        print(f"[DEBUG] ❌ 无法找到 wifi_scanner.py，已尝试路径:")
+        for p in possible_paths:
+            print(f"   - {p}")
+        return {"status": "error", "message": "服务端找不到 wifi_scanner.py，请检查文件位置"}
 
     try:
         # 3. 上传文件
@@ -72,11 +87,12 @@ async def deploy_agent_via_ssh():
         if "No such file" in file_check or not file_check:
             print(f"[DEBUG] ❌ 上传校验失败: 文件不存在")
             return {"status": "error", "message": "文件上传失败 (SFTP Error)"}
-        print(f"[DEBUG] ✅ 文件校验通过: {file_check}")
+        print(f"[DEBUG] ✅ 文件校验通过: {file_check.split(' ')[-1]}")
 
         # 5. [注入] 获取本机 IP 并写入脚本
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            # 连接公网 IP (不需要真实连通) 来获取准确的内网 IP
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
         except:
@@ -85,6 +101,7 @@ async def deploy_agent_via_ssh():
             s.close()
 
         print(f"[DEBUG] 注入 C2 IP: {local_ip}")
+        # 使用 sed 替换脚本中的空 IP 配置
         ssh_client.exec_command(f"sed -i 's/FIXED_C2_IP = \"\"/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
 
         # 6. [启动] 杀进程 -> 启动 -> 检查
