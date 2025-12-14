@@ -14,64 +14,119 @@ from pathlib import Path
 
 router = APIRouter()
 
-# --- C2 状态机 (仅保留轻量级状态) ---
+# --- C2 状态机 ---
 c2_state = {
-    "interfaces": [],  # 网卡列表
-    "current_task": "idle",  # 当前任务
+    "interfaces": [],
+    "current_task": "idle",
     "task_params": {},
     "last_heartbeat": 0
 }
 
-# 扫描完成事件
 scan_complete_event = asyncio.Event()
 
 
 # ==========================================
-# 1. 部署与连接 (保留之前的智能修复版)
+# 1. 智能部署接口 (带详细调试日志)
 # ==========================================
 @router.post("/agent/deploy")
 async def deploy_agent_via_ssh():
-    """[C2] 智能部署 Agent 到 Kali"""
+    """
+    [C2] 强制重装 Agent 并执行双重健康检查
+    """
     print(f"\n[DEBUG] ========== 开始部署 Agent ==========")
+
+    # 1. SSH 连接检查
     if not ssh_client.client:
+        print(f"[DEBUG] 正在建立 SSH 连接...")
         ssh_client.connect()
         if not ssh_client.client:
+            print(f"[DEBUG] ❌ SSH 连接失败，请检查 .env 配置")
             return {"status": "error", "message": "SSH 连接失败"}
+    print(f"[DEBUG] ✅ SSH 连接状态正常")
 
-    # 智能查找路径
+    # 2. 智能定位 Payload (递归向上查找)
     current_file = Path(__file__).resolve()
+    # 尝试多种可能的路径结构
     possible_paths = [
-        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",
-        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",
-        Path("kali_payloads/wifi_scanner.py").resolve()
+        current_file.parents[5] / "kali_payloads" / "wifi_scanner.py",  # 标准生产环境
+        current_file.parents[4] / "kali_payloads" / "wifi_scanner.py",  # 开发环境
+        Path("kali_payloads/wifi_scanner.py").resolve(),  # 相对路径
+        Path("../kali_payloads/wifi_scanner.py").resolve()
     ]
-    payload_src = next((p for p in possible_paths if p.exists()), None)
+
+    payload_src = None
+    for p in possible_paths:
+        if p.exists():
+            payload_src = p
+            print(f"[DEBUG] ✅ 成功定位 Payload 文件: {p}")
+            break
 
     if not payload_src:
-        return {"status": "error", "message": "服务端找不到 wifi_scanner.py"}
+        print(f"[DEBUG] ❌ 严重错误: 无法在服务端找到 wifi_scanner.py")
+        return {"status": "error", "message": "服务端文件缺失"}
 
     try:
         remote_path = "/tmp/wifi_scanner.py"
+
+        # 3. 上传文件
+        print(f"[DEBUG] 正在上传至 Kali: {remote_path}")
         ssh_client.upload_payload(str(payload_src), "wifi_scanner.py")
 
-        # 注入IP
+        # 4. [验尸逻辑 1] 检查文件是否存在
+        stdin, stdout, stderr = ssh_client.exec_command(f"ls -l {remote_path}")
+        file_check = stdout.read().decode().strip()
+        if "No such file" in file_check or not file_check:
+            print(f"[DEBUG] ❌ 上传验证失败: 文件不存在")
+            return {"status": "error", "message": "文件上传失败"}
+        print(f"[DEBUG] ✅ 文件上传验证通过: {file_check.split(' ')[-1]}")
+
+        # 5. 注入 IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s.connect(("8.8.8.8", 80)); local_ip = s.getsockname()[0]
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
         except:
             local_ip = "127.0.0.1"
         finally:
             s.close()
 
+        print(f"[DEBUG] 注入 C2 回连 IP: {local_ip}")
         ssh_client.exec_command(f"sed -i 's/FIXED_C2_IP = \"\"/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
+
+        # 6. 启动进程
+        print(f"[DEBUG] 正在重启 Agent 进程...")
         ssh_client.exec_command("pkill -f wifi_scanner.py")
         time.sleep(1)
-        ssh_client.exec_command(f"nohup python3 {remote_path} > /tmp/agent.log 2>&1 &")
 
-        return {"status": "success", "message": f"Agent 已部署并启动 (C2: {local_ip})"}
+        cmd = f"nohup python3 {remote_path} > /tmp/agent.log 2>&1 &"
+        ssh_client.exec_command(cmd)
+
+        # 等待进程初始化
+        time.sleep(2)
+
+        # 7. [验尸逻辑 2] 检查进程是否存活
+        stdin, stdout, stderr = ssh_client.exec_command("ps aux | grep wifi_scanner.py | grep -v grep")
+        proc_info = stdout.read().decode().strip()
+
+        if not proc_info:
+            stdin, stdout, stderr = ssh_client.exec_command("cat /tmp/agent.log")
+            log_content = stdout.read().decode().strip()
+            print(f"[DEBUG] ❌ 进程启动失败! Kali 日志:\n{log_content}")
+            return {"status": "error", "message": f"启动失败: {log_content[-100:]}"}
+
+        print(f"[DEBUG] ✅ Agent 进程运行中 (PID: {proc_info.split()[1]})")
+        print(f"[DEBUG] ========== 部署流程结束 ==========\n")
+
+        return {"status": "success", "message": "Agent 已成功部署并上线"}
+
     except Exception as e:
+        print(f"[DEBUG] ❌ 部署异常: {str(e)}")
         return {"status": "error", "message": str(e)}
 
+
+# ==========================================
+# 2. 任务控制与数据交互
+# ==========================================
 
 @router.get("/interfaces")
 async def get_interfaces():
@@ -81,10 +136,6 @@ async def get_interfaces():
     return {"interfaces": c2_state['interfaces']}
 
 
-# ==========================================
-# 2. 核心业务逻辑 (持久化改造)
-# ==========================================
-
 class ScanReq(BaseModel):
     interface: str = "wlan0"
 
@@ -92,14 +143,15 @@ class ScanReq(BaseModel):
 @router.post("/scan/start")
 async def trigger_scan(req: ScanReq, db: Session = Depends(get_session)):
     """
-    启动扫描：清空旧数据 -> 下发任务 -> 等待完成
+    [扫描] 清空数据库 -> 下发任务 -> 等待完成
     """
-    print(f"[*] [SCAN] 启动新一轮扫描，正在清空数据库...")
+    print(f"[*] [SCAN] 收到扫描请求，正在初始化数据库...")
 
-    # 1. 数据库重置 (核心需求)
+    # 1. 立即清空旧数据 (持久化模式核心)
     db.exec(delete(WiFiNetwork))
     db.exec(delete(TargetedClient))
     db.commit()
+    print(f"[*] [SCAN] 数据库已重置")
 
     # 2. 下发任务
     scan_complete_event.clear()
@@ -107,16 +159,15 @@ async def trigger_scan(req: ScanReq, db: Session = Depends(get_session)):
     c2_state['task_params'] = {'interface': req.interface}
 
     try:
-        # 等待 Agent 回传 (25秒超时)
+        # 等待 Agent 回传 (25s 超时)
         await asyncio.wait_for(scan_complete_event.wait(), timeout=25.0)
 
         # 3. 从数据库读取结果返回
-        networks = db.exec(select(WiFiNetwork).order_by(WiFiNetwork.signal_dbm.desc())).all()
-        return {"status": "success", "count": len(networks)}
-
+        count = db.exec(select(WiFiNetwork)).all()
+        return {"status": "success", "count": len(count)}
     except asyncio.TimeoutError:
         c2_state['current_task'] = 'idle'
-        return {"status": "timeout", "message": "扫描超时"}
+        return {"status": "timeout", "message": "扫描超时，Agent 未响应"}
 
 
 @router.get("/networks")
@@ -133,7 +184,7 @@ class MonitorReq(BaseModel):
 
 @router.post("/monitor/start")
 async def start_monitor(req: MonitorReq):
-    print(f"[*] [MONITOR] 锁定目标: {req.bssid}")
+    print(f"[*] [MONITOR] 锁定目标: {req.bssid} (CH: {req.channel})")
     c2_state['current_task'] = 'monitor_target'
     c2_state['task_params'] = req.dict()
     return {"status": "queued"}
@@ -147,7 +198,7 @@ async def stop_monitor():
 
 @router.get("/monitor/clients/{bssid}")
 async def get_monitored_clients(bssid: str, db: Session = Depends(get_session)):
-    """从数据库获取特定 AP 的客户端"""
+    """从数据库获取指定 AP 的客户端"""
     return db.exec(select(TargetedClient).where(TargetedClient.network_bssid == bssid)).all()
 
 
@@ -187,8 +238,9 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
         print(f"[*] [CALLBACK] 收到 {len(payload.networks)} 个 AP 数据")
 
         for net in payload.networks:
-            # 简单的 Upsert 逻辑
+            # Upsert 逻辑
             existing = db.exec(select(WiFiNetwork).where(WiFiNetwork.bssid == net['bssid'])).first()
+
             if existing:
                 existing.signal_dbm = net.get('signal', -100)
                 existing.client_count = net.get('client_count', 0)
@@ -207,8 +259,7 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                 db.add(new_net)
 
         db.commit()
-        # 通知等待的接口
-        scan_complete_event.set()
+        scan_complete_event.set()  # 解锁等待
         c2_state['current_task'] = 'idle'
         return {"status": "persisted"}
 
@@ -217,7 +268,6 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
         target = c2_state['task_params'].get('bssid')
         if not target: return {"status": "ignored"}
 
-        count = 0
         for item in payload.data:
             mac = item.get('mac')
             if not mac: continue
@@ -242,10 +292,8 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
                     packet_count=pkt,
                     signal_dbm=sig
                 ))
-            count += 1
 
         db.commit()
-        # print(f"[*] [CALLBACK] 更新 {count} 个客户端数据")
         return {"status": "updated"}
 
     return {"status": "ok"}
