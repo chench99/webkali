@@ -129,7 +129,7 @@ import api from '@/api'
 const route = useRoute()
 const bssid = route.params.bssid
 
-// 目标信息 (初始为空)
+// 目标信息
 const targetInfo = ref({
   ssid: '',
   bssid: bssid,
@@ -144,76 +144,72 @@ const aiThinking = ref(true)
 const logs = ref(['[SYSTEM] 攻击控制台已就绪。'])
 const logBox = ref(null)
 
-// 自动滚动日志
 const autoScroll = () => {
   nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 }
 
-// 1. 获取目标详细信息 (从后端或本地列表缓存)
+// 1. 获取目标信息
 const loadTargetInfo = async () => {
   try {
-    // 这里为了演示简单，我们直接重新请求一次列表，找到这个 BSSID 的信息
-    // 实际项目中应该有一个 /wifi/network/{bssid} 的详情接口
     const res = await api.get('/wifi/networks')
     const target = res.data.find(n => n.bssid === bssid)
     if (target) {
       targetInfo.value = target
       logs.value.push(`[INFO] 锁定目标: <span class="text-yellow-400">${target.ssid}</span> (CH: ${target.channel})`)
-      
-      // 信息获取成功后，立即触发 AI 分析
       startAIAnalysis()
     } else {
-      logs.value.push(`[WARN] 未在扫描缓存中找到目标信息，使用默认值。`)
-      targetInfo.value.ssid = "Unknown_Target"
+      logs.value.push(`[WARN] 未在缓存中找到目标，使用默认值。`)
+      targetInfo.value.ssid = "Unknown"
       targetInfo.value.encryption = "WPA2"
       startAIAnalysis()
     }
   } catch (e) {
-    logs.value.push(`[ERROR] 获取目标信息失败: ${e.message}`)
+    logs.value.push(`[ERROR] 获取目标失败: ${e.message}`)
     aiThinking.value = false
   }
 }
 
-// 2. 调用后端 AI 接口
+// 2. 调用 AI 分析 (修正了接口地址)
 const startAIAnalysis = async () => {
   aiThinking.value = true
   logs.value.push("[AI] 正连接 DeepSeek 神经网络进行战术推演...")
   autoScroll()
 
   try {
-    const res = await api.post('/attack/ai/analyze_target', {
+    // 修正：地址改为 /ai/analyze_target
+    const res = await api.post('/ai/analyze_target', {
       ssid: targetInfo.value.ssid,
       encryption: targetInfo.value.encryption,
       bssid: targetInfo.value.bssid
     })
     
-    // 绑定真实数据！
     aiResult.value = res.data
     logs.value.push(`[AI] 分析完成。风险评级: <span class="text-red-500 font-bold">${res.data.risk_level}</span>`)
     
   } catch (e) {
-    logs.value.push(`[ERROR] AI 分析服务无响应: ${e.message}`)
+    logs.value.push(`[ERROR] AI 分析失败: ${e.message}`)
+    aiResult.value = null
   } finally {
     aiThinking.value = false
     autoScroll()
   }
 }
 
-// 3. 执行攻击
+// 3. 攻击逻辑
 const runAttack = async (type) => {
   if (type === 'handshake') {
-    logs.value.push(`[CMD] 发送 Deauth 攻击指令... 目标: ${targetInfo.value.bssid}`)
+    logs.value.push(`[CMD] 发送 Deauth... 目标: ${targetInfo.value.bssid}`)
     try {
       await api.post('/wifi/attack/deauth', null, { 
         params: { bssid: bssid, interface: 'wlan0', duration: 60 } 
       })
-      logs.value.push("[Kali] 攻击包已发送。正在监听握手包...")
+      logs.value.push("[Kali] 攻击包发送成功。")
     } catch (e) {
-      logs.value.push(`[ERROR] 攻击请求失败: ${e.message}`)
+      logs.value.push(`[ERROR] 攻击失败: ${e.message}`)
     }
   } else if (type === 'eviltwin') {
-    if(!confirm("确定要部署假热点吗？这将断开当前网卡的连接。")) return;
-    logs.value.push(`[CMD] 正在配置 Hostapd... SSID: ${targetInfo.value.ssid}`)
+    if(!confirm("确定要部署假热点吗？")) return;
+    logs.value.push(`[CMD] 部署 Hostapd... SSID: ${targetInfo.value.ssid}`)
     try {
       await api.post('/attack/eviltwin/start', {
         ssid: targetInfo.value.ssid,
