@@ -12,7 +12,7 @@ class HandshakeRequest(BaseModel):
     bssid: str
     channel: int
     interface: str = "wlan0"
-    timeout: int = 45
+    timeout: int = 90
 
 class EvilTwinRequest(BaseModel):
     ssid: str
