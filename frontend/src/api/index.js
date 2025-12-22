@@ -3,7 +3,9 @@ import axios from 'axios'
 // 创建 axios 实例
 const api = axios.create({
   baseURL: '/api/v1', // 配合 vite.config.js 的代理
-  timeout: 30000      // 设置超时时间长一点，因为 AI 思考比较慢
+  // 【关键修改】将超时时间从 30000 改为 90000 (90秒)
+  // 因为握手包捕获通常需要 45-60 秒，AI 分析也可能很慢
+  timeout: 90000      
 })
 
 // 1. 系统接口
@@ -22,7 +24,9 @@ export const getInterfaces = () => api.get('/wifi/interfaces')
 export const sendDeauth = (params) => api.post('/wifi/attack/deauth', null, { params })
 
 // data: { ssid, encryption, bssid }
-export const analyzeTargetAI = (data) => api.post('/attack/ai/analyze_target', data)
+// 注意：这里我们修正过路径，但在 index.js 里也要确保用的是通用请求方式
+// 下面这些导出函数虽然被 AttackDetail.vue 用 api.post 直接替代了，但保留着也没错
+export const analyzeTargetAI = (data) => api.post('/ai/analyze_target', data)
 
 // data: { ssid, interface }
 export const startEvilTwin = (data) => api.post('/attack/eviltwin/start', data)

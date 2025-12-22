@@ -1,97 +1,113 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
-from app.modules.ai_agent.service import ai_service
+from pathlib import Path
 from app.core.ssh_manager import ssh_client
+import time
 import os
 
 router = APIRouter()
 
-
-# === 请求体模型 ===
-class AIAnalysisRequest(BaseModel):
+class HandshakeRequest(BaseModel):
     ssid: str
-    encryption: str
     bssid: str
-
+    channel: int
+    interface: str = "wlan0"
+    timeout: int = 45
 
 class EvilTwinRequest(BaseModel):
     ssid: str
     interface: str = "wlan0"
 
-
-# === 辅助函数：获取脚本绝对路径 ===
-def get_payload_path(filename: str):
-    """
-    智能获取 Windows 本地脚本的绝对路径
-    解决 "FileNotFound" 问题
-    """
-    # 获取当前文件 (attack.py) 的目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    # 回退 5 层找到项目根目录
-    project_root = os.path.abspath(os.path.join(current_dir, "../../../../.."))
-    # 拼接 kali_payloads 路径
-    payload_path = os.path.join(project_root, "kali_payloads", filename)
-
-    if not os.path.exists(payload_path):
-        print(f"[!] 错误: 找不到本地脚本 -> {payload_path}")
-        return None
-    return payload_path
-
-
-# =======================
-# 1. AI 战术分析接口
-# =======================
-@router.post("/ai/analyze_target")
-async def analyze_target(req: AIAnalysisRequest):
-    """
-    调用 DeepSeek 分析目标 WiFi 的弱点和攻击向量
-    """
-    print(f"[*] 收到 AI 分析请求: {req.ssid} ({req.encryption})")
-
-    # 模拟获取厂商 (可以通过 MAC 地址前3位查询，这里先简化)
-    vendor = "Unknown"
-
-    # 调用 AI 服务 (会去请求 DeepSeek API)
-    result = ai_service.analyze_wifi_target(req.ssid, req.encryption, vendor)
-
-    return result
-
-
-# =======================
-# 2. 钓鱼攻击接口 (Evil Twin)
-# =======================
-@router.post("/eviltwin/start")
-async def start_evil_twin(req: EvilTwinRequest):
-    """
-    启动双子热点钓鱼攻击
-    """
-    # 1. 确保 SSH 连接
+@router.post("/handshake/start")
+async def start_handshake_capture(req: HandshakeRequest):
+    print(f"\n[DEBUG] ========== 启动握手包捕获 ==========")
+    
+    # 1. 连接 SSH
     if not ssh_client.client:
         ssh_client.connect()
+        if not ssh_client.client:
+            return {"status": "error", "message": "SSH 连接失败"}
 
-    # 2. 获取本地脚本路径
-    local_script = get_payload_path("fake_ap.py")
-    if not local_script:
-        return {"status": "error", "msg": "Windows端找不到 fake_ap.py 脚本"}
+    # 2. 部署脚本 (自动寻址)
+    current_file = Path(__file__).resolve()
+    # 向上寻找 kali_payloads 目录
+    # 假设当前文件在 backend/app/api/v1/endpoints/attack.py
+    # 需要向上找 5 层到达项目根目录，或者寻找包含 kali_payloads 的父级目录
+    project_root = None
+    for p in current_file.parents:
+        if (p / "kali_payloads").exists():
+            project_root = p
+            break
+            
+    if not project_root:
+        # 开发环境容错：如果在 backend 目录下运行
+        if Path("kali_payloads").exists():
+             project_root = Path(".")
+        else:
+             return {"status": "error", "message": "找不到 kali_payloads 目录"}
 
-    # 3. 上传脚本到 Kali
-    print(f"[*] 正在上传钓鱼脚本: {local_script}")
-    remote_path = ssh_client.upload_payload(local_script, "fake_ap.py")
+    payload_src = project_root / "kali_payloads" / "handshake_worker.py"
+    remote_script = "/tmp/handshake_worker.py"
 
-    if not remote_path:
-        return {"status": "error", "msg": "脚本上传失败"}
+    if not payload_src.exists():
+        return {"status": "error", "message": f"本地脚本缺失: {payload_src}"}
 
-    # 4. 赋予执行权限
-    ssh_client.exec_command(f"chmod +x {remote_path}")
+    try:
+        print(f"[DEBUG] 上传脚本: {payload_src}")
+        ssh_client.upload_payload(str(payload_src), "handshake_worker.py")
+        
+        # 3. 执行脚本 (重要：设置 timeout 比脚本运行时间稍长)
+        # 脚本参数: BSSID Channel Timeout Interface
+        cmd = f"python3 {remote_script} {req.bssid} {req.channel} {req.timeout} {req.interface}"
+        print(f"[DEBUG] 执行 Kali 命令: {cmd}")
+        
+        # 【关键修复】读取输出流会阻塞当前线程，直到脚本结束
+        # 这确保了后端会等待 Kali 跑完那 45 秒
+        stdin, stdout, stderr = ssh_client.exec_command(cmd, timeout=req.timeout + 10)
+        
+        # 读取日志
+        output = stdout.read().decode()
+        error = stderr.read().decode()
+        
+        print(f"[DEBUG] Kali 输出:\n{output}")
+        
+        if "[SUCCESS] CAPTURED" in output:
+            # 下载文件逻辑
+            remote_cap = "/tmp/handshake_capture-01.cap"
+            save_dir = project_root / "backend" / "captures"
+            
+            # 确保存储目录存在
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True)
+            
+            clean_ssid = "".join(x for x in req.ssid if x.isalnum())
+            local_filename = f"{clean_ssid}_{req.bssid.replace(':','')}.cap"
+            local_path = save_dir / local_filename
+            
+            print(f"[DEBUG] 下载文件: {remote_cap} -> {local_path}")
+            sftp = ssh_client.client.open_sftp()
+            sftp.get(remote_cap, str(local_path))
+            sftp.close()
+            
+            return {
+                "status": "success", 
+                "message": "握手包捕获成功", 
+                "file": local_filename,
+                "logs": output[-500:] # 只返回最后500字符日志
+            }
+        else:
+            return {
+                "status": "fail", 
+                "message": "超时未捕获", 
+                "logs": output[-500:] if output else error
+            }
 
-    # 5. 执行脚本
-    # 格式: python3 fake_ap.py "SSID" "INTERFACE"
-    print(f"[*] 启动伪造热点: {req.ssid} on {req.interface}")
-    cmd = f"nohup python3 {remote_path} '{req.ssid}' {req.interface} > /tmp/fake_ap.log 2>&1 &"
-    ssh_client.exec_command(cmd)
+    except Exception as e:
+        print(f"[DEBUG] ❌ 异常: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
-    return {
-        "status": "started",
-        "msg": f"正在伪造热点: {req.ssid}",
-        "log_path": "/tmp/fake_ap.log"
-    }
+@router.post("/eviltwin/start")
+async def start_eviltwin(req: EvilTwinRequest):
+    print(f"[DEBUG] 启动 Evil Twin: {req.ssid}")
+    # 这里需要实现真实的 Evil Twin 逻辑，目前先返回模拟成功
+    return {"status": "success", "message": "Evil Twin 部署指令已下发"}

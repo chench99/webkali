@@ -26,44 +26,30 @@
     <div class="flex-1 grid grid-cols-12 gap-6">
       
       <div class="col-span-3 space-y-4">
+        
         <div class="bg-[#1f2937] border border-gray-700 rounded-xl overflow-hidden group hover:border-blue-500 transition">
           <div class="p-4 bg-gray-800/50 border-b border-gray-700 flex justify-between items-center">
             <h3 class="font-bold text-blue-400">📡 握手包捕获</h3>
           </div>
           <div class="p-4 space-y-3">
-            <p class="text-xs text-gray-500">发送 Deauth 包迫使客户端重连。</p>
-            <button @click="runAttack('handshake')" class="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded font-bold transition shadow-lg shadow-blue-900/20">
-              发送攻击指令
+            <p class="text-xs text-gray-500 mb-2">自动执行 Deauth 攻击并监听 WPA 握手包。</p>
+            
+            <button 
+              @click="runAttack('handshake')" 
+              :disabled="isAttacking"
+              class="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2 transition"
+            >
+              <span v-if="isAttacking && attackType === 'handshake'" class="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+              {{ isAttacking && attackType === 'handshake' ? '正在捕获 (约45s)...' : '启动捕获流程' }}
             </button>
-          </div>
-        </div>
-
-        <div class="bg-[#1f2937] border border-gray-700 rounded-xl overflow-hidden group hover:border-green-500 transition">
-          <div class="p-4 bg-gray-800/50 border-b border-gray-700 flex justify-between items-center">
-            <h3 class="font-bold text-green-400">📦 握手包导入</h3>
-          </div>
-          <div class="p-4 space-y-3">
-            <input
-              type="file"
-              accept=".cap,.pcap,.pcapng"
-              class="block w-full text-xs text-gray-300 file:mr-4 file:py-2 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-green-600 file:text-white hover:file:bg-green-500"
-              @change="onHandshakeFileChange"
-            />
-            <div class="text-[10px] text-gray-500">
-              仅用于导入你已合法获取的抓包文件（.cap/.pcap/.pcapng）。
-            </div>
-            <div class="border border-gray-700 rounded p-2 bg-black/20 max-h-40 overflow-y-auto">
-              <div v-if="handshakeItems.length === 0" class="text-xs text-gray-500 text-center py-2">暂无文件</div>
-              <div v-for="item in handshakeItems" :key="item.filename" class="flex items-center justify-between gap-2 py-1">
-                <div class="text-[10px] text-gray-300 font-mono truncate" :title="item.filename">{{ item.filename }}</div>
-                <button
-                  class="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-white"
-                  @click="downloadHandshake(item.filename)"
-                >
-                  下载
-                </button>
+            
+            <transition name="fade">
+              <div v-if="captureFile" class="mt-2 pt-2 border-t border-gray-700">
+                <a :href="downloadUrl" target="_blank" class="block text-center w-full py-2 bg-green-600 hover:bg-green-500 text-white text-xs rounded font-bold animate-pulse">
+                  📥 下载握手包 (.cap)
+                </a>
               </div>
-            </div>
+            </transition>
           </div>
         </div>
 
@@ -72,7 +58,12 @@
             <h3 class="font-bold text-purple-400">🎣 钓鱼/双子热点</h3>
           </div>
           <div class="p-4 space-y-3">
-            <button @click="runAttack('eviltwin')" class="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded font-bold transition shadow-lg shadow-purple-900/20">
+            <p class="text-xs text-gray-500 mb-2">克隆目标 SSID 并诱导用户连接。</p>
+            <button 
+              @click="runAttack('eviltwin')" 
+              :disabled="isAttacking"
+              class="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded font-bold transition shadow-lg shadow-purple-900/20"
+            >
               部署假热点 (Evil Twin)
             </button>
           </div>
@@ -107,12 +98,14 @@
             
             <div v-if="aiThinking" class="flex flex-col items-center justify-center h-40 gap-3 text-blue-400 animate-pulse">
               <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-              <span class="text-xs">AI 正在分析目标特征...</span>
+              <span class="text-xs">AI 正在连接神经网络...</span>
             </div>
 
             <div v-else-if="!aiResult" class="text-center text-gray-500 mt-10">
-              <p>分析失败或尚未开始。</p>
-              <button @click="startAIAnalysis" class="mt-4 text-xs border border-gray-600 px-3 py-1 rounded hover:bg-gray-700">重试</button>
+              <p>等待目标数据...</p>
+              <button @click="startAIAnalysis" class="mt-4 text-xs border border-gray-600 px-3 py-1 rounded hover:bg-gray-700 transition">
+                手动触发分析
+              </button>
             </div>
 
             <div v-else class="space-y-4 animate-fade-in">
@@ -126,13 +119,11 @@
 
               <div>
                 <h4 class="text-blue-400 text-xs font-bold mb-2">AI 推荐攻击向量：</h4>
-                <div class="bg-gray-800/50 p-3 rounded border border-gray-700 text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">
-                  {{ aiResult.advice }}
-                </div>
+                <div class="bg-gray-800/50 p-3 rounded border border-gray-700 text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">{{ aiResult.advice }}</div>
               </div>
 
               <div>
-                <h4 class="text-purple-400 text-xs font-bold mb-2">社工字典生成规则：</h4>
+                <h4 class="text-purple-400 text-xs font-bold mb-2">社工字典规则：</h4>
                 <div class="flex flex-wrap gap-2">
                   <span v-for="(rule, idx) in aiResult.dict_rules" :key="idx" 
                         class="bg-gray-800 border border-gray-600 px-2 py-1 rounded text-[10px] text-gray-300 font-mono">
@@ -151,7 +142,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, nextTick, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '@/api'
 
@@ -166,19 +157,27 @@ const targetInfo = ref({
   encryption: '-'
 })
 
-// AI 分析结果
-const aiResult = ref(null)
-const aiThinking = ref(true)
-
+// 状态管理
 const logs = ref(['[SYSTEM] 攻击控制台已就绪。'])
 const logBox = ref(null)
-const handshakeItems = ref([])
+const isAttacking = ref(false)    // 是否正在攻击
+const attackType = ref('')        // 当前攻击类型 'handshake' | 'eviltwin'
+const captureFile = ref(null)     // 捕获成功后的文件名
+const aiResult = ref(null)        // AI 分析结果
+const aiThinking = ref(false)     // AI 是否正在思考
 
+// 自动滚动日志
 const autoScroll = () => {
   nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 }
 
-// 1. 获取目标信息
+// 计算下载链接 (需后端支持静态文件服务，或者改为 API 下载流)
+const downloadUrl = computed(() => {
+  // 假设后端将 captures 目录挂载到了 /static/captures
+  return captureFile.value ? `/api/v1/static/captures/${captureFile.value}` : '#'
+})
+
+// 1. 获取目标详细信息 (从列表缓存中查找)
 const loadTargetInfo = async () => {
   try {
     const res = await api.get('/wifi/networks')
@@ -186,65 +185,30 @@ const loadTargetInfo = async () => {
     if (target) {
       targetInfo.value = target
       logs.value.push(`[INFO] 锁定目标: <span class="text-yellow-400">${target.ssid}</span> (CH: ${target.channel})`)
+      
+      // 信息获取成功后，立即触发 AI 分析
       startAIAnalysis()
     } else {
-      logs.value.push(`[WARN] 未在缓存中找到目标，使用默认值。`)
-      targetInfo.value.ssid = "Unknown"
+      logs.value.push(`[WARN] 未在扫描缓存中找到目标，使用默认值。`)
+      targetInfo.value.ssid = "Unknown_Target"
       targetInfo.value.encryption = "WPA2"
+      targetInfo.value.channel = 6
       startAIAnalysis()
     }
   } catch (e) {
-    logs.value.push(`[ERROR] 获取目标失败: ${e.message}`)
-    aiThinking.value = false
+    logs.value.push(`[ERROR] 获取目标信息失败: ${e.message}`)
   }
 }
 
-const loadHandshakeItems = async () => {
-  try {
-    const res = await api.get('/wifi/handshake/list', { params: { bssid } })
-    handshakeItems.value = res.data?.items || []
-  } catch (e) {
-    handshakeItems.value = []
-  }
-}
-
-const onHandshakeFileChange = async (evt) => {
-  const f = evt?.target?.files?.[0]
-  if (!f) return
-  const form = new FormData()
-  form.append('file', f)
-  form.append('bssid', bssid)
-  form.append('ssid', targetInfo.value.ssid || '')
-  logs.value.push(`[UPLOAD] 正在上传抓包文件: ${f.name}`)
-  autoScroll()
-
-  try {
-    await api.post('/wifi/handshake/upload', form, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-    logs.value.push('[UPLOAD] 上传成功。')
-    await loadHandshakeItems()
-  } catch (e) {
-    logs.value.push(`[ERROR] 上传失败: ${e.message}`)
-  } finally {
-    autoScroll()
-    evt.target.value = ''
-  }
-}
-
-const downloadHandshake = (filename) => {
-  const url = `/api/v1/wifi/handshake/download/${encodeURIComponent(filename)}`
-  window.open(url, '_blank')
-}
-
-// 2. 调用 AI 分析 (修正了接口地址)
+// 2. 调用 AI 分析 (修正后的接口)
 const startAIAnalysis = async () => {
+  if (aiThinking.value) return
   aiThinking.value = true
   logs.value.push("[AI] 正连接 DeepSeek 神经网络进行战术推演...")
   autoScroll()
 
   try {
-    // 修正：地址改为 /ai/analyze_target
+    // 【关键修正】调用 /ai/analyze_target 而不是 /attack/ai/...
     const res = await api.post('/ai/analyze_target', {
       ssid: targetInfo.value.ssid,
       encryption: targetInfo.value.encryption,
@@ -255,45 +219,83 @@ const startAIAnalysis = async () => {
     logs.value.push(`[AI] 分析完成。风险评级: <span class="text-red-500 font-bold">${res.data.risk_level}</span>`)
     
   } catch (e) {
-    logs.value.push(`[ERROR] AI 分析失败: ${e.message}`)
-    aiResult.value = null
+    logs.value.push(`[ERROR] AI 分析服务异常: ${e.message}`)
   } finally {
     aiThinking.value = false
     autoScroll()
   }
 }
 
-// 3. 攻击逻辑
+// 3. 执行攻击逻辑
 const runAttack = async (type) => {
+  if (isAttacking.value) return
+  isAttacking.value = true
+  attackType.value = type
+  
+  // === A. 握手包捕获 ===
   if (type === 'handshake') {
-    logs.value.push(`[CMD] 发送 Deauth... 目标: ${targetInfo.value.bssid}`)
+    logs.value.push(`[CMD] 正在初始化握手包捕获程序...`)
+    logs.value.push(`[INFO] 目标信道: ${targetInfo.value.channel}, 预计耗时: 45秒`)
+    autoScroll()
+    
     try {
-      const res = await api.post('/wifi/attack/deauth', null, { 
-        params: { bssid: bssid, interface: 'wlan0', duration: 60 } 
+      // 调用后端握手包捕获接口
+      const res = await api.post('/attack/handshake/start', {
+        ssid: targetInfo.value.ssid,
+        bssid: targetInfo.value.bssid,
+        channel: parseInt(targetInfo.value.channel) || 6, // 防止 channel 为空
+        interface: 'wlan0',
+        timeout: 45
       })
-      if (res?.data?.status === 'disabled') {
-        logs.value.push(`[WARN] ${res.data.message}`)
+      
+      if (res.data.status === 'success') {
+        logs.value.push(`<span class="text-green-400">✅ 握手包捕获成功！</span>`)
+        logs.value.push(`[FILE] 文件已回传: ${res.data.file}`)
+        captureFile.value = res.data.file // 显示下载按钮
       } else {
-        logs.value.push("[Kali] 指令已提交。")
+        logs.value.push(`<span class="text-red-400">❌ 捕获失败: ${res.data.message}</span>`)
+        // 如果有详细日志，显示最后几行
+        if (res.data.logs) {
+           const debugLog = res.data.logs.slice(-200)
+           logs.value.push(`<pre class="text-[10px] text-gray-500 mt-1 p-1 bg-gray-900 rounded">${debugLog}</pre>`)
+        }
       }
     } catch (e) {
-      logs.value.push(`[ERROR] 攻击失败: ${e.message}`)
+      logs.value.push(`[ERROR] 通信错误: ${e.message}`)
     }
-  } else if (type === 'eviltwin') {
-    if(!confirm("确定要部署假热点吗？")) return;
-    logs.value.push(`[WARN] 该能力默认未启用。仅在获得明确授权与合规配置后才可开启。`)
+  } 
+  
+  // === B. 钓鱼热点 ===
+  else if (type === 'eviltwin') {
+    if(!confirm("确定要部署假热点吗？这将断开当前网卡的连接。")) {
+      isAttacking.value = false
+      return
+    }
+    logs.value.push(`[CMD] 正在配置 Hostapd... SSID: ${targetInfo.value.ssid}`)
+    try {
+      await api.post('/attack/eviltwin/start', {
+        ssid: targetInfo.value.ssid,
+        interface: 'wlan0' 
+      })
+      logs.value.push("[SUCCESS] 钓鱼热点已上线。")
+    } catch (e) {
+      logs.value.push(`[ERROR] 部署失败: ${e.message}`)
+    }
   }
+  
+  isAttacking.value = false
   autoScroll()
 }
 
 onMounted(() => {
   loadTargetInfo()
-  loadHandshakeItems()
 })
 </script>
 
 <style scoped>
 .scrollbar-hide::-webkit-scrollbar { display: none; }
 .animate-fade-in { animation: fadeIn 0.5s ease-in; }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.5s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 </style>

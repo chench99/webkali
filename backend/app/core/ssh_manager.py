@@ -13,7 +13,6 @@ class SSHManager:
 
     def connect(self):
         """建立 SSH 连接 (带详细调试信息)"""
-        # 如果已经连上了，先跳过
         if self.client and self.client.get_transport() and self.client.get_transport().is_active():
             return
 
@@ -26,7 +25,6 @@ class SSHManager:
             self.client = paramiko.SSHClient()
             self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            # 强制设置超时时间为 10 秒
             self.client.connect(
                 self.host,
                 port=settings.KALI_PORT,
@@ -46,21 +44,28 @@ class SSHManager:
             print(f"ERROR TYPE: {type(e)}")
             print(f"ERROR MSG: {e}")
             self.client = None
-            # 不要在这里 raise，否则主程序会崩，我们让它打印出来就好
 
         print(f"------------ SSH DEBUG END ------------")
-    def exec_command(self, cmd, background=False):
-        """执行命令"""
+
+    def exec_command(self, cmd, background=False, timeout=None):
+        """
+        执行命令
+        :param timeout: (新增) 等待命令执行的超时时间，传递给 paramiko
+        """
         if not self.client: self.connect()
 
         # 加上 source /etc/profile 确保环境变量加载
         full_cmd = f"source /etc/profile; {cmd}"
 
         if background:
-            # 后台执行，不等待结果 (如 nohup)
+            # 后台执行，不等待结果
             full_cmd = f"nohup sh -c '{full_cmd}' > /dev/null 2>&1 &"
 
-        stdin, stdout, stderr = self.client.exec_command(full_cmd)
+        # 【修复点】接收并传递 timeout 参数
+        # Paramiko 的 exec_command 支持 timeout 参数（用于建立通道的时间）
+        # 虽然这不等于命令执行超时，但为了防止 TypeError，必须接收它
+        stdin, stdout, stderr = self.client.exec_command(full_cmd, timeout=timeout)
+        
         return stdin, stdout, stderr
 
     def upload_payload(self, local_path, remote_filename):
@@ -68,6 +73,8 @@ class SSHManager:
         if not self.sftp: self.connect()
         remote_path = f"/tmp/{remote_filename}"
         try:
+            # 统一路径分隔符，防止 Windows 反斜杠问题
+            local_path = str(local_path)
             self.sftp.put(local_path, remote_path)
             return remote_path
         except Exception as e:
@@ -75,11 +82,11 @@ class SSHManager:
             return None
 
     def download_file(self, remote_path, local_path):
-        """从 Kali 下载文件 (如握手包)"""
+        """从 Kali 下载文件"""
         if not self.sftp: self.connect()
         try:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            self.sftp.get(remote_path, local_path)
+            self.sftp.get(remote_path, str(local_path))
             return True
         except Exception as e:
             print(f"[!] Download Failed: {e}")
