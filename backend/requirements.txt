@@ -10,3 +10,5 @@ psutil
 gputil
 scapy
 requests
+openai
+python-multipart

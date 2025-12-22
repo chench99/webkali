@@ -279,6 +279,14 @@ export default {
         const res = await api.post('/wifi/agent/deploy');
         if (res.data.status === 'success') {
           ElMessage.success(res.data.message);
+          if (res.data.agent_log_tail || res.data.hint) {
+            const details = [
+              res.data.c2_ip ? `C2 回连 IP: ${res.data.c2_ip}` : null,
+              res.data.hint || null,
+              res.data.agent_log_tail ? `\n--- /tmp/agent.log (tail) ---\n${res.data.agent_log_tail}` : null
+            ].filter(Boolean).join('\n')
+            ElMessageBox.alert(details || 'Agent 已部署，但暂未回连。', 'Agent 诊断信息', { type: 'warning' })
+          }
           this.fetchInterfaces();
         } else {
           ElMessageBox.alert(res.data.message, '部署失败', { type: 'error' });

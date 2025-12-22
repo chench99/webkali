@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlmodel import Session, select, delete
 from app.core.database import get_session
 from app.models.wifi import WiFiNetwork, TargetedClient
 from app.core.ssh_manager import ssh_client
+from app.core.config import settings
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import time
@@ -11,6 +13,7 @@ import asyncio
 import socket
 from datetime import datetime
 from pathlib import Path
+import re
 
 router = APIRouter()
 
@@ -22,7 +25,156 @@ c2_state = {
     "last_heartbeat": 0
 }
 
+monitor_state = {
+    "last_update": 0.0,
+    "last_count": 0,
+    "target_bssid": ""
+}
+
 scan_complete_event = asyncio.Event()
+_handshake_dir = Path(__file__).resolve().parents[5] / "captures" / "handshakes"
+_handshake_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_bssid(value: str) -> str:
+    if not value:
+        return "unknown"
+    v = value.strip().lower()
+    if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", v):
+        return v
+    return "unknown"
+
+def _detect_local_ip_for_kali() -> str:
+    host = getattr(ssh_client, "host", None) or settings.KALI_HOST
+    port = getattr(settings, "KALI_PORT", 22)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((host, port))
+        ip = s.getsockname()[0]
+        return ip or "127.0.0.1"
+    except Exception:
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            return ip or "127.0.0.1"
+        except Exception:
+            return "127.0.0.1"
+    finally:
+        s.close()
+
+def _safe_int(value, default: int) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        s = str(value).strip()
+        if not s:
+            return default
+        return int(float(s))
+    except Exception:
+        return default
+
+
+@router.get("/agent/debug")
+async def get_agent_debug():
+    now = time.time()
+    last = float(c2_state.get("last_heartbeat") or 0)
+    return {
+        "server_time": int(now),
+        "last_heartbeat": int(last) if last else 0,
+        "heartbeat_age_sec": round(now - last, 1) if last else None,
+        "interfaces_count": len(c2_state.get("interfaces") or []),
+        "current_task": c2_state.get("current_task"),
+        "task_params": c2_state.get("task_params"),
+    }
+
+
+@router.get("/agent/log")
+async def get_agent_log(lines: int = 120):
+    if lines < 1:
+        lines = 1
+    if lines > 500:
+        lines = 500
+    if not ssh_client.client:
+        ssh_client.connect()
+    if not ssh_client.client:
+        raise HTTPException(status_code=503, detail="SSH 未连接，无法读取 Kali 日志")
+    stdin, stdout, stderr = ssh_client.exec_command(f"tail -n {int(lines)} /tmp/agent.log || true")
+    return {"lines": stdout.read().decode(errors="ignore")}
+
+@router.get("/monitor/debug")
+async def get_monitor_debug():
+    now = time.time()
+    last = float(monitor_state.get("last_update") or 0)
+    return {
+        "server_time": int(now),
+        "target_bssid": monitor_state.get("target_bssid") or "",
+        "last_update": int(last) if last else 0,
+        "age_sec": round(now - last, 1) if last else None,
+        "last_count": int(monitor_state.get("last_count") or 0),
+        "current_task": c2_state.get("current_task"),
+        "task_params": c2_state.get("task_params"),
+    }
+
+
+@router.post("/handshake/upload")
+async def upload_handshake(file: UploadFile = File(...), bssid: str = Form(""), ssid: str = Form("")):
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名为空")
+
+    ext = Path(filename).suffix.lower()
+    if ext not in [".cap", ".pcap", ".pcapng"]:
+        raise HTTPException(status_code=400, detail="仅支持 .cap/.pcap/.pcapng")
+
+    bssid_norm = _normalize_bssid(bssid)
+    ts = int(time.time())
+    safe_name = f"handshake_{bssid_norm.replace(':', '')}_{ts}{ext}"
+    dst = _handshake_dir / safe_name
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="空文件")
+
+    dst.write_bytes(data)
+    return {
+        "status": "success",
+        "filename": safe_name,
+        "bssid": bssid_norm,
+        "ssid": (ssid or "").strip(),
+        "size": dst.stat().st_size
+    }
+
+
+@router.get("/handshake/list")
+async def list_handshakes(bssid: str = ""):
+    bssid_norm = _normalize_bssid(bssid) if bssid else ""
+    items = []
+    for p in sorted(_handshake_dir.glob("handshake_*"), key=lambda x: x.stat().st_mtime, reverse=True):
+        name = p.name
+        if bssid_norm and (f"handshake_{bssid_norm.replace(':', '')}_" not in name):
+            continue
+        st = p.stat()
+        items.append(
+            {
+                "filename": name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime)
+            }
+        )
+    return {"items": items}
+
+
+@router.get("/handshake/download/{filename}")
+async def download_handshake(filename: str):
+    name = Path(filename).name
+    path = _handshake_dir / name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(str(path), filename=name)
 
 
 # ==========================================
@@ -90,8 +242,9 @@ async def deploy_agent_via_ssh():
         finally:
             s.close()
 
+        local_ip = _detect_local_ip_for_kali()
         print(f"[DEBUG] 注入 C2 回连 IP: {local_ip}")
-        ssh_client.exec_command(f"sed -i 's/FIXED_C2_IP = \"\"/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
+        ssh_client.exec_command(f"sed -i 's/^FIXED_C2_IP = .*/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
 
         # 6. 启动进程
         print(f"[DEBUG] 正在重启 Agent 进程...")
@@ -116,8 +269,21 @@ async def deploy_agent_via_ssh():
 
         print(f"[DEBUG] ✅ Agent 进程运行中 (PID: {proc_info.split()[1]})")
         print(f"[DEBUG] ========== 部署流程结束 ==========\n")
+        online_deadline = time.time() + 12
+        while time.time() < online_deadline:
+            if (time.time() - c2_state.get("last_heartbeat", 0)) < 10 and c2_state.get("interfaces"):
+                return {"status": "success", "message": "Agent 已成功部署并上线", "c2_ip": local_ip}
+            await asyncio.sleep(1)
 
-        return {"status": "success", "message": "Agent 已成功部署并上线"}
+        stdin, stdout, stderr = ssh_client.exec_command("tail -n 80 /tmp/agent.log || true")
+        log_tail = stdout.read().decode(errors="ignore")
+        return {
+            "status": "success",
+            "message": "Agent 已部署并运行，但尚未回连（仍显示离线属正常现象）",
+            "c2_ip": local_ip,
+            "hint": "常见原因：回连 IP 不可达 / Windows 防火墙拦截 8001 / Kali 到 Windows 网络不通",
+            "agent_log_tail": log_tail
+        }
 
     except Exception as e:
         print(f"[DEBUG] ❌ 部署异常: {str(e)}")
@@ -183,10 +349,23 @@ class MonitorReq(BaseModel):
 
 
 @router.post("/monitor/start")
-async def start_monitor(req: MonitorReq):
-    print(f"[*] [MONITOR] 锁定目标: {req.bssid} (CH: {req.channel})")
+async def start_monitor(req: MonitorReq, db: Session = Depends(get_session)):
+    is_online = (time.time() - c2_state['last_heartbeat']) < 15
+    if not is_online:
+        return {"status": "error", "message": "Agent 离线，无法下发监听任务"}
+
+    bssid = (req.bssid or "").strip().upper()
+    print(f"[*] [MONITOR] 锁定目标: {bssid} (CH: {req.channel})")
+
+    db.exec(delete(TargetedClient).where(TargetedClient.network_bssid == bssid))
+    db.commit()
+
+    monitor_state["last_update"] = 0.0
+    monitor_state["last_count"] = 0
+    monitor_state["target_bssid"] = bssid
+
     c2_state['current_task'] = 'monitor_target'
-    c2_state['task_params'] = req.dict()
+    c2_state['task_params'] = {**req.dict(), "bssid": bssid}
     return {"status": "queued"}
 
 
@@ -195,11 +374,20 @@ async def stop_monitor():
     c2_state['current_task'] = 'idle'
     return {"status": "stopped"}
 
+@router.post("/attack/deauth")
+async def request_deauth_attack(bssid: str, interface: str = "wlan0", duration: int = 60):
+    return {
+        "status": "disabled",
+        "message": "该能力默认未启用。仅在获得明确授权与合规配置后才可开启。",
+        "params": {"bssid": bssid, "interface": interface, "duration": duration}
+    }
+
 
 @router.get("/monitor/clients/{bssid}")
 async def get_monitored_clients(bssid: str, db: Session = Depends(get_session)):
     """从数据库获取指定 AP 的客户端"""
-    return db.exec(select(TargetedClient).where(TargetedClient.network_bssid == bssid)).all()
+    key = (bssid or "").strip().upper()
+    return db.exec(select(TargetedClient).where(TargetedClient.network_bssid == key)).all()
 
 
 # ==========================================
@@ -265,20 +453,28 @@ async def agent_callback(payload: CallbackData, db: Session = Depends(get_sessio
 
     # === B. 处理监听客户端 (实时入库) ===
     if payload.type == 'monitor_update' and payload.data:
-        target = c2_state['task_params'].get('bssid')
-        if not target: return {"status": "ignored"}
+        target = (c2_state.get('task_params') or {}).get('bssid') or ""
+        target = str(target).strip().upper()
+        if not target:
+            return {"status": "ignored"}
+
+        monitor_state["last_update"] = time.time()
+        monitor_state["last_count"] = len(payload.data)
+        monitor_state["target_bssid"] = target
 
         for item in payload.data:
-            mac = item.get('mac')
-            if not mac: continue
+            mac = item.get('mac') or item.get('client_mac')
+            if not mac:
+                continue
+            mac = str(mac).strip().upper()
 
             client = db.exec(select(TargetedClient).where(
                 TargetedClient.client_mac == mac,
                 TargetedClient.network_bssid == target
             )).first()
 
-            pkt = int(item.get('packets', 0))
-            sig = int(item.get('signal', -100))
+            pkt = _safe_int(item.get('packets'), 0)
+            sig = _safe_int(item.get('signal'), -100)
 
             if client:
                 client.packet_count = pkt

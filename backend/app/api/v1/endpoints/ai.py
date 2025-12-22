@@ -24,6 +24,8 @@ async def chat_with_ai(req: ChatRequest):
     """通用对话接口"""
     if not req.prompt:
         raise HTTPException(status_code=400, detail="内容不能为空")
+    if getattr(ai_service, "client", None) is None:
+        raise HTTPException(status_code=503, detail="未配置 DEEPSEEK_API_KEY")
     answer_text = ai_service.chat(req.prompt, req.mode)
     return {"code": 200, "result": answer_text}
 
@@ -34,6 +36,13 @@ async def analyze_target(target: TargetInfo):
     [新增] WiFi 目标战术分析接口
     强制 AI 返回 JSON 格式的分析结果
     """
+    if getattr(ai_service, "client", None) is None:
+        return {
+            "risk_level": "未配置",
+            "summary": "未配置 DEEPSEEK_API_KEY，无法进行 AI 分析。",
+            "advice": "在 `backend/.env` 配置 `DEEPSEEK_API_KEY` 后重启后端。",
+            "dict_rules": []
+        }
     # 构造 Prompt，强制 AI 输出 JSON
     prompt = f"""
     你是网络安全专家。请分析以下 WiFi 目标并给出渗透测试建议。
@@ -69,8 +78,8 @@ async def analyze_target(target: TargetInfo):
         # 如果 AI 没返回 JSON，做个兜底
         print(f"[AI Error] 解析失败，原始返回: {raw_response}")
         return {
-            "risk_level": "未知",
-            "summary": "AI 返回格式异常，无法解析。",
+            "risk_level": "格式异常",
+            "summary": "AI 返回格式异常，无法解析为 JSON。",
             "advice": raw_response,  # 把原始文本展示出来
             "dict_rules": ["默认字典"]
         }
