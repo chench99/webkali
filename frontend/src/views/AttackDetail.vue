@@ -40,14 +40,25 @@
               class="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2 transition"
             >
               <span v-if="isAttacking && attackType === 'handshake'" class="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-              {{ isAttacking && attackType === 'handshake' ? '正在捕获 (约45s)...' : '启动捕获流程' }}
+              {{ isAttacking && attackType === 'handshake' ? '正在捕获 (90s)...' : '启动捕获流程' }}
             </button>
             
             <transition name="fade">
-              <div v-if="captureFile" class="mt-2 pt-2 border-t border-gray-700">
-                <a :href="downloadUrl" target="_blank" class="block text-center w-full py-2 bg-green-600 hover:bg-green-500 text-white text-xs rounded font-bold animate-pulse">
-                  📥 下载握手包 (.cap)
-                </a>
+              <div v-if="captureResult" class="mt-4 pt-4 border-t border-gray-600 space-y-2">
+                <div class="text-center text-green-400 text-xs font-bold mb-2">🎉 捕获成功!</div>
+                
+                <div class="grid grid-cols-2 gap-2">
+                  <a :href="getDownloadUrl(captureResult.file_cap)" target="_blank" class="block text-center py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] rounded border border-gray-500">
+                    📥 下载 .CAP
+                  </a>
+                  <a v-if="captureResult.file_hc" :href="getDownloadUrl(captureResult.file_hc)" target="_blank" class="block text-center py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] rounded border border-gray-500">
+                    📥 下载 .HC22000
+                  </a>
+                </div>
+
+                <button @click="$router.push('/crack')" class="w-full py-2 bg-green-600 hover:bg-green-500 text-white text-xs rounded font-bold animate-pulse shadow-lg shadow-green-900/50 mt-2">
+                  🚀 前往破解中心
+                </button>
               </div>
             </transition>
           </div>
@@ -58,12 +69,7 @@
             <h3 class="font-bold text-purple-400">🎣 钓鱼/双子热点</h3>
           </div>
           <div class="p-4 space-y-3">
-            <p class="text-xs text-gray-500 mb-2">克隆目标 SSID 并诱导用户连接。</p>
-            <button 
-              @click="runAttack('eviltwin')" 
-              :disabled="isAttacking"
-              class="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded font-bold transition shadow-lg shadow-purple-900/20"
-            >
+            <button @click="runAttack('eviltwin')" class="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded font-bold transition shadow-lg shadow-purple-900/20">
               部署假热点 (Evil Twin)
             </button>
           </div>
@@ -98,14 +104,12 @@
             
             <div v-if="aiThinking" class="flex flex-col items-center justify-center h-40 gap-3 text-blue-400 animate-pulse">
               <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-              <span class="text-xs">AI 正在连接神经网络...</span>
+              <span class="text-xs">AI 正在分析目标特征...</span>
             </div>
 
             <div v-else-if="!aiResult" class="text-center text-gray-500 mt-10">
-              <p>等待目标数据...</p>
-              <button @click="startAIAnalysis" class="mt-4 text-xs border border-gray-600 px-3 py-1 rounded hover:bg-gray-700 transition">
-                手动触发分析
-              </button>
+              <p>分析失败或尚未开始。</p>
+              <button @click="startAIAnalysis" class="mt-4 text-xs border border-gray-600 px-3 py-1 rounded hover:bg-gray-700">重试</button>
             </div>
 
             <div v-else class="space-y-4 animate-fade-in">
@@ -119,11 +123,13 @@
 
               <div>
                 <h4 class="text-blue-400 text-xs font-bold mb-2">AI 推荐攻击向量：</h4>
-                <div class="bg-gray-800/50 p-3 rounded border border-gray-700 text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">{{ aiResult.advice }}</div>
+                <div class="bg-gray-800/50 p-3 rounded border border-gray-700 text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">
+                  {{ aiResult.advice }}
+                </div>
               </div>
 
               <div>
-                <h4 class="text-purple-400 text-xs font-bold mb-2">社工字典规则：</h4>
+                <h4 class="text-purple-400 text-xs font-bold mb-2">社工字典生成规则：</h4>
                 <div class="flex flex-wrap gap-2">
                   <span v-for="(rule, idx) in aiResult.dict_rules" :key="idx" 
                         class="bg-gray-800 border border-gray-600 px-2 py-1 rounded text-[10px] text-gray-300 font-mono">
@@ -149,7 +155,6 @@ import api from '@/api'
 const route = useRoute()
 const bssid = route.params.bssid
 
-// 目标信息
 const targetInfo = ref({
   ssid: '',
   bssid: bssid,
@@ -157,27 +162,22 @@ const targetInfo = ref({
   encryption: '-'
 })
 
-// 状态管理
 const logs = ref(['[SYSTEM] 攻击控制台已就绪。'])
 const logBox = ref(null)
-const isAttacking = ref(false)    // 是否正在攻击
-const attackType = ref('')        // 当前攻击类型 'handshake' | 'eviltwin'
-const captureFile = ref(null)     // 捕获成功后的文件名
-const aiResult = ref(null)        // AI 分析结果
-const aiThinking = ref(false)     // AI 是否正在思考
+const isAttacking = ref(false)
+const attackType = ref('')
+const captureResult = ref(null) // 存储捕获结果对象 {file_cap, file_hc}
+const aiResult = ref(null)
+const aiThinking = ref(true)
 
-// 自动滚动日志
 const autoScroll = () => {
   nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 }
 
-// 计算下载链接 (需后端支持静态文件服务，或者改为 API 下载流)
-const downloadUrl = computed(() => {
-  // 假设后端将 captures 目录挂载到了 /static/captures
-  return captureFile.value ? `/api/v1/static/captures/${captureFile.value}` : '#'
-})
+const getDownloadUrl = (filename) => {
+  return filename ? `/api/v1/static/captures/${filename}` : '#'
+}
 
-// 1. 获取目标详细信息 (从列表缓存中查找)
 const loadTargetInfo = async () => {
   try {
     const res = await api.get('/wifi/networks')
@@ -185,30 +185,25 @@ const loadTargetInfo = async () => {
     if (target) {
       targetInfo.value = target
       logs.value.push(`[INFO] 锁定目标: <span class="text-yellow-400">${target.ssid}</span> (CH: ${target.channel})`)
-      
-      // 信息获取成功后，立即触发 AI 分析
       startAIAnalysis()
     } else {
       logs.value.push(`[WARN] 未在扫描缓存中找到目标，使用默认值。`)
       targetInfo.value.ssid = "Unknown_Target"
       targetInfo.value.encryption = "WPA2"
-      targetInfo.value.channel = 6
       startAIAnalysis()
     }
   } catch (e) {
     logs.value.push(`[ERROR] 获取目标信息失败: ${e.message}`)
+    aiThinking.value = false
   }
 }
 
-// 2. 调用 AI 分析 (修正后的接口)
 const startAIAnalysis = async () => {
-  if (aiThinking.value) return
   aiThinking.value = true
   logs.value.push("[AI] 正连接 DeepSeek 神经网络进行战术推演...")
   autoScroll()
 
   try {
-    // 【关键修正】调用 /ai/analyze_target 而不是 /attack/ai/...
     const res = await api.post('/ai/analyze_target', {
       ssid: targetInfo.value.ssid,
       encryption: targetInfo.value.encryption,
@@ -219,59 +214,46 @@ const startAIAnalysis = async () => {
     logs.value.push(`[AI] 分析完成。风险评级: <span class="text-red-500 font-bold">${res.data.risk_level}</span>`)
     
   } catch (e) {
-    logs.value.push(`[ERROR] AI 分析服务异常: ${e.message}`)
+    logs.value.push(`[ERROR] AI 分析服务无响应: ${e.message}`)
   } finally {
     aiThinking.value = false
     autoScroll()
   }
 }
 
-// 3. 执行攻击逻辑
 const runAttack = async (type) => {
   if (isAttacking.value) return
   isAttacking.value = true
   attackType.value = type
   
-  // === A. 握手包捕获 ===
   if (type === 'handshake') {
-    logs.value.push(`[CMD] 正在初始化握手包捕获程序...`)
-    logs.value.push(`[INFO] 目标信道: ${targetInfo.value.channel}, 预计耗时: 45秒`)
-    autoScroll()
-    
+    logs.value.push(`[CMD] 启动握手包捕获... (目标CH: ${targetInfo.value.channel})`)
     try {
-      // 调用后端握手包捕获接口
       const res = await api.post('/attack/handshake/start', {
         ssid: targetInfo.value.ssid,
         bssid: targetInfo.value.bssid,
-        channel: parseInt(targetInfo.value.channel) || 6, // 防止 channel 为空
+        channel: parseInt(targetInfo.value.channel) || 6,
         interface: 'wlan0',
-        timeout: 45
+        timeout: 90
       })
       
       if (res.data.status === 'success') {
-        logs.value.push(`<span class="text-green-400">✅ 握手包捕获成功！</span>`)
-        logs.value.push(`[FILE] 文件已回传: ${res.data.file}`)
-        captureFile.value = res.data.file // 显示下载按钮
+        logs.value.push(`<span class="text-green-400">✅ 捕获成功！</span>`)
+        // 存储结果以便显示按钮
+        captureResult.value = res.data 
+        if (res.data.file_hc) {
+           logs.value.push(`[INFO] 格式转换成功: .hc22000 已生成`)
+        }
       } else {
         logs.value.push(`<span class="text-red-400">❌ 捕获失败: ${res.data.message}</span>`)
-        // 如果有详细日志，显示最后几行
-        if (res.data.logs) {
-           const debugLog = res.data.logs.slice(-200)
-           logs.value.push(`<pre class="text-[10px] text-gray-500 mt-1 p-1 bg-gray-900 rounded">${debugLog}</pre>`)
-        }
+        if(res.data.logs) logs.value.push(`<pre class="text-[10px] text-gray-500">${res.data.logs.slice(-200)}</pre>`)
       }
     } catch (e) {
       logs.value.push(`[ERROR] 通信错误: ${e.message}`)
     }
-  } 
-  
-  // === B. 钓鱼热点 ===
-  else if (type === 'eviltwin') {
-    if(!confirm("确定要部署假热点吗？这将断开当前网卡的连接。")) {
-      isAttacking.value = false
-      return
-    }
-    logs.value.push(`[CMD] 正在配置 Hostapd... SSID: ${targetInfo.value.ssid}`)
+  } else if (type === 'eviltwin') {
+    if(!confirm("确定要部署假热点吗？")) { isAttacking.value = false; return; }
+    logs.value.push(`[CMD] 部署 Hostapd... SSID: ${targetInfo.value.ssid}`)
     try {
       await api.post('/attack/eviltwin/start', {
         ssid: targetInfo.value.ssid,
@@ -282,7 +264,6 @@ const runAttack = async (type) => {
       logs.value.push(`[ERROR] 部署失败: ${e.message}`)
     }
   }
-  
   isAttacking.value = false
   autoScroll()
 }
