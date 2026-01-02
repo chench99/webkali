@@ -1,8 +1,10 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
+import os
 
-_ENV_FILE = str(Path(__file__).resolve().parents[2] / ".env")
-
+# 自动定位到 backend 根目录
+# __file__ 是 config.py, parent是 core, parent.parent 是 app, parent.parent.parent 是 backend
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Kali-C2-Platform"
@@ -25,17 +27,14 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "default_secret"
     DEBUG: bool = True
 
-    # === 新增：AI 配置 ===
+    # AI Config
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
 
     class Config:
-        env_file = _ENV_FILE
-        extra = "ignore"  # 忽略多余的字段，防止报错
-
-    # === 新增：Hashcat 路径配置 ===
-    HASHCAT_PATH: str = ""
-
-
+        # 使用绝对路径，确保无论在哪里运行 main.py 都能找到 .env
+        env_file = os.path.join(BASE_DIR, ".env")
+        env_file_encoding = 'utf-8'
+        extra = "ignore"  # 忽略多余字段
 
 settings = Settings()
