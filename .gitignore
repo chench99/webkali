@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Windows & IDE
+.idea/
+.vscode/
+*.log
+
+# Project Data (不要上传抓到的握手包和庞大的字典)
+data/handshakes/*
+data/hashcat_converted/*
+data/wordlists/*
+data/mysql_data/*
+!data/wordlists/.gitkeep
+
+# Node.js
+node_modules/
+dist/
