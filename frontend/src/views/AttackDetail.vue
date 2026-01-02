@@ -6,6 +6,7 @@
         <div class="w-12 h-12 bg-red-900/30 rounded-lg flex items-center justify-center border border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]">
           <span class="text-2xl animate-pulse">🎯</span>
         </div>
+        
         <div>
           <h1 class="text-xl font-bold text-white tracking-wider flex items-center gap-2">
             {{ targetInfo.ssid || '正在获取目标...' }}
@@ -26,7 +27,7 @@
           <span class="text-xs font-bold text-gray-400">⚔️ 攻击网卡:</span>
           <select 
             v-model="selectedInterface"
-            class="bg-transparent text-yellow-400 text-xs font-mono focus:outline-none cursor-pointer"
+            class="bg-transparent text-yellow-400 text-xs font-mono focus:outline-none cursor-pointer w-32"
           >
             <option value="" disabled>选择网卡...</option>
             <option v-for="iface in interfaces" :key="iface.name" :value="iface.name">
@@ -56,7 +57,7 @@
           
           <div class="p-4 space-y-3">
             <p class="text-[10px] text-gray-500 leading-tight">
-              自动执行 "监听 -> Deauth干扰 -> 抓包" 流程。成功后可进行哈希破解。
+              全自动流程：监听 -> Deauth 诱骗 -> 抓包 -> 格式转换 (.hc22000)。
             </p>
             
             <div v-if="!captureSuccess">
@@ -67,18 +68,39 @@
                 :class="{'opacity-50 cursor-not-allowed': isRunning}"
               >
                 <span v-if="isRunning && currentAttack === 'capture'" class="animate-spin">⏳</span>
-                {{ isRunning && currentAttack === 'capture' ? '正在捕获 (约30s)...' : '🚀 启动捕获 (Capture)' }}
+                {{ isRunning && currentAttack === 'capture' ? '正在捕获 (约40s)...' : '🚀 启动捕获 (Capture)' }}
               </button>
             </div>
 
-            <div v-else class="animate-fade-in-up">
+            <div v-else class="animate-fade-in-up space-y-3">
+              <div class="grid grid-cols-2 gap-2">
+                <button 
+                  v-if="capturedFiles.cap"
+                  @click="downloadFile(capturedFiles.cap)"
+                  class="py-2 bg-blue-600 hover:bg-blue-500 text-white text-[10px] rounded font-bold transition flex flex-col items-center justify-center border border-blue-400/30"
+                  title="下载原始数据包 (Wireshark)"
+                >
+                  <span class="flex items-center gap-1">📥 .CAP</span>
+                  <span class="opacity-70 scale-75 font-normal">原始包</span>
+                </button>
+                
+                <button 
+                  v-if="capturedFiles.hash"
+                  @click="downloadFile(capturedFiles.hash)"
+                  class="py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] rounded font-bold transition flex flex-col items-center justify-center border border-purple-400/30"
+                  title="下载 Hashcat 格式 (直接跑字典)"
+                >
+                  <span class="flex items-center gap-1">📥 .HC22000</span>
+                  <span class="opacity-70 scale-75 font-normal">Hashcat</span>
+                </button>
+              </div>
+
               <button 
                 @click="$router.push('/crack')" 
                 class="w-full py-2.5 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white text-xs rounded font-bold transition shadow-lg shadow-orange-900/30 flex justify-center items-center gap-2 border border-orange-400/30"
               >
-                <span>🔑</span> ✅ 捕获成功！前往破解
+                <span>🔑</span> ✅ 前往破解中心
               </button>
-              <p class="text-center text-[10px] text-gray-500 mt-2">已保存至 captures 目录</p>
             </div>
           </div>
         </div>
@@ -90,11 +112,9 @@
             </h3>
           </div>
           <div class="p-4 space-y-3">
-            <p class="text-[10px] text-gray-500 leading-tight">
-              持续发送解除认证包，强制客户端断线重连。可用于阻断网络或诱骗连接。
-            </p>
+            <p class="text-[10px] text-gray-500">发送解除认证帧，强制客户端断线重连。</p>
             <div class="flex items-center gap-2 mb-2">
-              <label class="text-xs text-gray-400">时长(秒):</label>
+              <label class="text-xs text-gray-400">持续时长(秒):</label>
               <input type="number" v-model="attackDuration" class="bg-black/30 border border-gray-600 rounded px-2 py-1 text-xs w-16 text-center text-white focus:border-blue-500 outline-none">
             </div>
             <button 
@@ -128,16 +148,16 @@
       </div>
 
       <div class="col-span-6 flex flex-col gap-4">
-        <div class="flex-1 bg-black rounded-xl border border-gray-700 p-4 flex flex-col font-mono text-xs shadow-inner relative h-[500px]">
+        <div class="flex-1 bg-black rounded-xl border border-gray-700 p-4 flex flex-col font-mono text-xs shadow-inner relative h-[600px]">
           
           <div class="absolute top-0 left-0 right-0 h-8 bg-gray-900/80 border-b border-gray-800 rounded-t-xl flex items-center px-4 justify-between">
             <span class="text-gray-500 flex items-center gap-2">
-              <span class="w-2 h-2 bg-gray-600 rounded-full"></span>
-              <span class="w-2 h-2 bg-gray-600 rounded-full"></span>
-              <span class="w-2 h-2 bg-gray-600 rounded-full"></span>
+              <span class="w-2 h-2 bg-red-500 rounded-full"></span>
+              <span class="w-2 h-2 bg-yellow-500 rounded-full"></span>
+              <span class="w-2 h-2 bg-green-500 rounded-full"></span>
             </span>
             <div class="text-[10px] text-gray-500 flex items-center gap-2">
-              <span class="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span> SSH CONSOLE
+              <span class="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span> SSH CONSOLE / AGENT LOGS
             </div>
           </div>
 
@@ -168,7 +188,7 @@
             <div v-if="aiThinking" class="flex flex-col items-center justify-center h-40 gap-3 text-blue-400 animate-pulse">
               <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
               <span class="text-xs font-bold">神经网络正在推理...</span>
-              <span class="text-[10px] text-gray-500">Generating Attack Vectors...</span>
+              <span class="text-[10px] text-gray-500">Analysing Encryption & Vectors...</span>
             </div>
 
             <div v-else-if="!aiResult" class="text-center text-gray-500 mt-10">
@@ -221,7 +241,7 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-// === 关键修复：使用命名导入 ===
+// 引入所有 API (使用命名导入)
 import { 
   getInterfaces, 
   getWifiList, 
@@ -235,7 +255,7 @@ const route = useRoute()
 const router = useRouter()
 const bssid = route.params.bssid
 
-// 状态管理
+// 1. 状态定义
 const targetInfo = ref({
   ssid: '',
   bssid: bssid,
@@ -245,25 +265,27 @@ const targetInfo = ref({
 })
 
 const interfaces = ref([])
-const selectedInterface = ref('') // 动态网卡选择
+const selectedInterface = ref('') // 动态网卡
 const attackDuration = ref(60)
 
-const logs = ref(['[SYSTEM] 攻击控制台初始化...'])
+const logs = ref(['[SYSTEM] 攻击控制台初始化完成。'])
 const logBox = ref(null)
 
 const isRunning = ref(false)
 const currentAttack = ref('')
-const captureSuccess = ref(false) // 捕获成功标志
+
+// 捕获状态管理
+const captureSuccess = ref(false)
+const capturedFiles = ref({ cap: null, hash: null }) // 存储后端返回的文件名
 
 const aiResult = ref(null)
 const aiThinking = ref(false)
 
-// 自动滚动
+// 2. 辅助函数
 const autoScroll = () => {
   nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 }
 
-// 添加日志
 const addLog = (msg, type = 'info') => {
   let color = 'text-gray-300'
   if (type === 'cmd') color = 'text-yellow-400 font-bold'
@@ -275,15 +297,22 @@ const addLog = (msg, type = 'info') => {
   autoScroll()
 }
 
-// 1. 获取网卡列表并自动选择
+// 3. 下载文件
+const downloadFile = (filename) => {
+  if (!filename) return
+  // 直接在新窗口打开后端下载链接
+  const url = `/api/v1/attack/download/${filename}`
+  window.open(url, '_blank')
+}
+
+// 4. 加载网卡列表
 const loadInterfaces = async () => {
   try {
-    // 修复：直接调用命名导出的函数，不加 api.
-    const res = await getInterfaces() 
+    const res = await getInterfaces()
     if (res.data && res.data.interfaces) {
       interfaces.value = res.data.interfaces
       
-      // 智能选择逻辑：优先选 Monitor 模式，或者名字带 mon 的，或者第一个
+      // 智能选择 Monitor 网卡
       const monitorIface = interfaces.value.find(i => i.mode === 'Monitor' || i.name.includes('mon'))
       if (monitorIface) {
         selectedInterface.value = monitorIface.name
@@ -300,17 +329,17 @@ const loadInterfaces = async () => {
   }
 }
 
-// 2. 加载目标信息
+// 5. 加载目标信息
 const loadTargetInfo = async () => {
   try {
-    const res = await getWifiList() // 修复
+    const res = await getWifiList()
     const target = res.data.find(n => n.bssid === bssid)
     if (target) {
       targetInfo.value = target
       addLog(`[INFO] 目标锁定: <span class="text-white">${target.ssid}</span>`, 'info')
       addLog(`[INFO] 信道: ${target.channel} | 加密: ${target.encryption}`, 'info')
       
-      // 触发 AI 分析
+      // 信息加载成功后，自动开始 AI 分析
       if (!aiResult.value) startAIAnalysis()
     } else {
       addLog(`[WARN] 本地缓存未找到目标，使用默认参数。`, 'error')
@@ -321,13 +350,13 @@ const loadTargetInfo = async () => {
   }
 }
 
-// 3. AI 分析
+// 6. AI 分析
 const startAIAnalysis = async () => {
   aiThinking.value = true
   addLog("[AI] 正在连接 DeepSeek 神经网络...", 'kali')
   
   try {
-    const res = await analyzeTargetAI({ // 修复
+    const res = await analyzeTargetAI({
       ssid: targetInfo.value.ssid,
       encryption: targetInfo.value.encryption,
       bssid: targetInfo.value.bssid
@@ -336,13 +365,12 @@ const startAIAnalysis = async () => {
     addLog(`[AI] 分析完成。风险等级: ${res.data.risk_level}`, 'success')
   } catch (e) {
     addLog(`[AI] 分析服务无响应: ${e.message}`, 'error')
-    aiThinking.value = false
   } finally {
     aiThinking.value = false
   }
 }
 
-// 4. 执行攻击 (核心逻辑)
+// 7. 核心攻击逻辑
 const runAttack = async (type) => {
   if (!selectedInterface.value) {
     addLog(`[ERROR] 请先在右上角选择攻击网卡！`, 'error')
@@ -353,60 +381,75 @@ const runAttack = async (type) => {
   currentAttack.value = type
   
   try {
+    // === Deauth 攻击 ===
     if (type === 'deauth') {
       addLog(`[CMD] 启动 Deauth 干扰... 目标: ${targetInfo.value.bssid}`, 'cmd')
       addLog(`[CFG] 网卡: ${selectedInterface.value} | 时长: ${attackDuration.value}s`, 'kali')
       
-      await sendDeauth({ // 修复
+      await sendDeauth({
         bssid: targetInfo.value.bssid,
-        interface: selectedInterface.value, // 动态网卡
+        interface: selectedInterface.value,
         channel: String(targetInfo.value.channel),
         duration: parseInt(attackDuration.value)
       })
       
       addLog("[Kali] 攻击指令已下发 (PID: Running)。", 'success')
       
+    // === 握手包捕获 ===
     } else if (type === 'capture') {
-      addLog(`[CMD] 启动握手包捕获序列...`, 'cmd')
-      addLog(`[INFO] 正在执行: 监听 -> 诱骗重连 -> 抓包`, 'kali')
+      addLog(`[CMD] 启动握手包捕获序列 (耗时约40秒)...`, 'cmd')
+      addLog(`[INFO] 阶段: 锁定信道 -> 诱骗重连 -> 抓包`, 'kali')
       
-      const res = await captureHandshake({ // 修复
+      const res = await captureHandshake({
         bssid: targetInfo.value.bssid,
-        interface: selectedInterface.value, // 动态网卡
+        interface: selectedInterface.value,
         channel: String(targetInfo.value.channel),
-        duration: 35 // 捕获通常给 30-40秒
+        duration: 35 // 给后端 35秒执行时间
       })
       
       if (res.data.status === 'success') {
         addLog(`[SUCCESS] ✅ 握手包捕获成功！`, 'success')
-        addLog(`[FILE] ${res.data.file}`, 'info')
-        captureSuccess.value = true // 显示破解按钮
+        
+        // 存储文件名
+        capturedFiles.value.cap = res.data.cap_file
+        capturedFiles.value.hash = res.data.hash_file
+        
+        if(res.data.hash_file) {
+          addLog(`[INFO] Hashcat 格式转换完成 (.hc22000)`, 'kali')
+        } else {
+          addLog(`[WARN] 未生成 .hc22000 文件 (Kali 可能缺失 hcxtools)`, 'error')
+        }
+        
+        captureSuccess.value = true // 切换 UI 状态
       } else {
-        addLog(`[FAIL] 捕获超时或失败: ${res.data.msg}`, 'error')
+        addLog(`[FAIL] 捕获失败: ${res.data.msg}`, 'error')
+        if (res.data.debug) addLog(`[DEBUG] ${res.data.debug}`, 'kali')
       }
 
+    // === 钓鱼热点 ===
     } else if (type === 'eviltwin') {
       if(!confirm("⚠️ 警告：启动双子热点将占用网卡，可能导致 SSH 短暂断开。是否继续？")) {
         isRunning.value = false
         return
       }
       addLog(`[CMD] 部署 Rogue AP: ${targetInfo.value.ssid}`, 'cmd')
-      await startEvilTwin({ // 修复
+      await startEvilTwin({
         ssid: targetInfo.value.ssid,
         interface: selectedInterface.value
       })
-      addLog("[SUCCESS] 钓鱼热点已启动。", 'success')
+      addLog("[SUCCESS] 钓鱼热点已启动 (Mock Mode)。", 'success')
     }
 
   } catch (e) {
     addLog(`[ERROR] 请求异常: ${e.message}`, 'error')
   } finally {
     if (type !== 'deauth') isRunning.value = false
-    // Deauth 是异步的，这里立即恢复按钮状态
-    setTimeout(() => { isRunning.value = false }, 2000)
+    // Deauth 立即释放按钮
+    setTimeout(() => { if (type === 'deauth') isRunning.value = false }, 2000)
   }
 }
 
+// 8. 生命周期挂载
 onMounted(async () => {
   await loadInterfaces() // 先加载网卡
   await loadTargetInfo() // 再加载目标
