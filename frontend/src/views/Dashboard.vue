@@ -52,14 +52,27 @@
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       
       <div @click="$router.push('/wifi')" class="bg-[#1f2937] hover:bg-[#2d3748] p-5 rounded-xl border border-gray-700/50 cursor-pointer transition group relative overflow-hidden">
-        <div class="absolute right-0 bottom-0 opacity-10 group-hover:opacity-20 group-hover:scale-110 transition-transform duration-500">
-          <Connection class="w-24 h-24 text-blue-500" />
-        </div>
         <div class="w-10 h-10 rounded-lg bg-blue-900/30 flex items-center justify-center mb-3 group-hover:bg-blue-600 group-hover:shadow-[0_0_15px_rgba(37,99,235,0.5)] transition-all">
           <Connection class="w-5 h-5 text-blue-400 group-hover:text-white" />
         </div>
-        <h4 class="text-white font-bold mb-1">无线渗透</h4>
-        <p class="text-xs text-gray-500 leading-relaxed">WiFi 扫描、Deauth 攻击。</p>
+        <h4 class="text-white font-bold mb-1">无线渗透 (Scanner)</h4>
+        <p class="text-xs text-gray-500 leading-relaxed">WiFi 扫描、Deauth 攻击、握手包抓取。</p>
+      </div>
+
+      <div @click="$router.push('/crack')" class="bg-[#1f2937] hover:bg-[#2d3748] p-5 rounded-xl border border-gray-700/50 cursor-pointer transition group relative overflow-hidden">
+        <div class="w-10 h-10 rounded-lg bg-yellow-900/30 flex items-center justify-center mb-3 group-hover:bg-yellow-600 group-hover:shadow-[0_0_15px_rgba(202,138,4,0.5)] transition-all">
+          <Key class="w-5 h-5 text-yellow-400 group-hover:text-white" />
+        </div>
+        <h4 class="text-white font-bold mb-1">密码破解 (Hashcat)</h4>
+        <p class="text-xs text-gray-500 leading-relaxed">本地显卡加速，跑握手包字典。</p>
+      </div>
+
+      <div @click="$router.push('/eviltwin')" class="bg-[#1f2937] hover:bg-[#2d3748] p-5 rounded-xl border border-gray-700/50 cursor-pointer transition group relative overflow-hidden">
+        <div class="w-10 h-10 rounded-lg bg-purple-900/30 flex items-center justify-center mb-3 group-hover:bg-purple-600 group-hover:shadow-[0_0_15px_rgba(147,51,234,0.5)] transition-all">
+          <Share class="w-5 h-5 text-purple-400 group-hover:text-white" />
+        </div>
+        <h4 class="text-white font-bold mb-1">双子热点 (Evil Twin)</h4>
+        <p class="text-xs text-gray-500 leading-relaxed">双网卡钓鱼，克隆 AP，强制门户认证。</p>
       </div>
 
     </div>
@@ -82,8 +95,7 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import api from '@/api'
-// ⚠️ 关键修改：只引用存在的图标
-import { Connection } from '@element-plus/icons-vue'
+import { Connection, Key, Share } from '@element-plus/icons-vue' // 引入图标
 
 const stats = ref({
   host: { cpu: 0, ram: 0 },
