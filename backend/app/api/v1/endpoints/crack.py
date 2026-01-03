@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from pathlib import Path
-from pydantic import BaseModel  # <--- 必须导入这个
+from pydantic import BaseModel  # <--- 必须引入这个
 from app.core.config import settings
 import os
 import subprocess
@@ -8,7 +8,7 @@ import subprocess
 router = APIRouter()
 
 
-# 全局状态
+# 状态管理
 class CrackState:
     process = None
     is_running = False
@@ -17,19 +17,19 @@ class CrackState:
 
 state = CrackState()
 
-# 路径配置
+# 路径定位
 BACKEND_DIR = Path(__file__).resolve().parents[4]
 HANDSHAKE_DIR = BACKEND_DIR / "captures"
 HANDSHAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# === 🔥 关键新增：定义请求模型 ===
+# === 🔥 关键修复：定义请求体模型 ===
+# 只有定义了这个，FastAPI 才知道要去读 JSON Body
 class CrackRequest(BaseModel):
     handshake_file: str
     wordlist_file: str
 
 
-# 1. 获取握手包
 @router.get("/files/handshakes")
 async def get_handshakes():
     files = []
@@ -38,14 +38,14 @@ async def get_handshakes():
             if f.is_file() and f.suffix in ['.hc22000', '.cap', '.pcap']:
                 files.append({
                     "name": f.name,
-                    "path": str(f.resolve()),  # 绝对路径
+                    "path": str(f.resolve()),  # 传回绝对路径
                     "size": f"{f.stat().st_size / 1024:.2f} KB"
                 })
+    # 按时间排序，最新的在前面
     files.sort(key=lambda x: os.path.getmtime(x['path']), reverse=True)
     return {"status": "success", "files": files}
 
 
-# 2. 获取字典
 @router.get("/files/wordlists")
 async def get_wordlists():
     wordlist_path = Path(settings.WORDLIST_DIR)
@@ -61,34 +61,33 @@ async def get_wordlists():
             if f.is_file():
                 files.append({
                     "name": f.name,
-                    "path": str(f.resolve()),
+                    "path": str(f.resolve()),  # 传回绝对路径
                     "size": f"{f.stat().st_size / (1024 * 1024):.2f} MB"
                 })
     except Exception as e:
         return {"status": "error", "msg": str(e), "files": []}
-
     return {"status": "success", "dir": str(wordlist_path), "files": files}
 
 
-# 3. 启动破解 (已修复参数接收)
+# === 🔥 关键修复：使用模型接收参数 ===
 @router.post("/start")
-async def start_crack(req: CrackRequest):  # <--- 这里改成了接收对象 req
-    """启动 Hashcat 破解任务"""
+async def start_crack(req: CrackRequest):
+    """启动 Hashcat"""
     if state.is_running:
         return {"status": "error", "message": "任务已在运行中"}
 
-    # 从对象中提取参数
+    # 从对象中取值，防止取到空字符串
     handshake_file = req.handshake_file
     wordlist_file = req.wordlist_file
 
-    print(f"[DEBUG] Receive Start Crack: \nHandshake: {handshake_file}\nWordlist: {wordlist_file}")
+    print(f"[DEBUG] Start Crack -> Handshake: {handshake_file} | Wordlist: {wordlist_file}")
 
     if not handshake_file or not os.path.exists(handshake_file):
-        return {"status": "error", "message": f"握手包路径无效: {handshake_file}"}
+        return {"status": "error", "message": f"握手包路径无效 (File Not Found): {handshake_file}"}
     if not wordlist_file or not os.path.exists(wordlist_file):
-        return {"status": "error", "message": f"字典路径无效: {wordlist_file}"}
+        return {"status": "error", "message": f"字典路径无效 (File Not Found): {wordlist_file}"}
 
-    # Hashcat 命令
+    # 构造命令
     cmd = [
         "hashcat",
         "-m", "22000",
@@ -118,7 +117,6 @@ async def start_crack(req: CrackRequest):  # <--- 这里改成了接收对象 re
         return {"status": "error", "message": str(e)}
 
 
-# 4. 停止任务
 @router.post("/stop")
 async def stop_crack():
     if state.process:
@@ -131,15 +129,12 @@ async def stop_crack():
     return {"status": "error", "message": "无运行任务"}
 
 
-# 5. 获取日志
 @router.get("/logs")
 async def get_logs():
     logs = []
     status = {"state": "Idle", "speed": "0 H/s", "progress": 0}
-
     if state.process and state.process.poll() is not None:
         state.is_running = False
-
     if state.log_file.exists():
         try:
             with open(state.log_file, "r", errors='ignore') as f:
@@ -154,5 +149,4 @@ async def get_logs():
                             status["progress"] = int(parts[0].strip()) / int(parts[1].split("(")[0].strip()) * 100
         except:
             pass
-
     return {"status": status, "is_running": state.is_running, "logs": logs}
