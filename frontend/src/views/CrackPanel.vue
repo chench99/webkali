@@ -58,7 +58,6 @@
       </div>
 
       <div class="col-span-8 flex flex-col gap-4">
-        
         <div class="bg-[#1f2937] border border-gray-700 rounded-xl p-4 shadow-lg grid grid-cols-4 gap-4">
           <div class="bg-black/20 p-3 rounded border border-gray-600/30">
             <div class="text-gray-500 text-[10px] uppercase">Status</div>
@@ -76,7 +75,6 @@
             <div class="text-gray-500 text-[10px] uppercase">ETA</div>
             <div class="text-lg font-bold text-yellow-400 font-mono">{{ crackStatus.eta || '-' }}</div>
           </div>
-          
           <div class="col-span-4 mt-2">
             <div class="flex justify-between text-xs mb-1 text-gray-400">
               <span>Progress</span>
@@ -87,7 +85,6 @@
             </div>
           </div>
         </div>
-
         <div class="bg-black rounded-xl border border-gray-700 p-4 flex-1 flex flex-col font-mono text-xs shadow-inner relative min-h-[400px]">
           <div class="flex justify-between items-center mb-2 border-b border-gray-800 pb-2">
             <span class="text-gray-500">root@webkali:~/hashcat# console_output</span>
@@ -97,9 +94,6 @@
               <span v-if="line.includes('[SYSTEM]')" class="text-blue-400 font-bold">{{ line }}</span>
               <span v-else-if="line.includes('Recovered')" class="text-green-400 font-bold border-b border-green-500">{{ line }}</span>
               <span v-else class="text-gray-300">{{ line }}</span>
-            </div>
-            <div v-if="logs.length === 0" class="text-gray-600 italic mt-4 text-center">
-              Waiting for task to start...
             </div>
           </div>
         </div>
@@ -136,20 +130,16 @@ const statusColor = computed(() => {
 
 onMounted(async () => {
   await loadFiles()
-  
-  // 自动选中路由参数传来的文件
+  // 自动选中
   const hcParam = route.query.hc || route.query.cap
   if (hcParam) {
-     // 简单匹配文件名
      const match = handshakes.value.find(f => f.path.includes(hcParam) || f.name === hcParam)
      if (match) selectedHandshake.value = match.path
   }
-
   // 默认选中第一个字典
   if (wordlists.value.length > 0 && !selectedWordlist.value) {
     selectedWordlist.value = wordlists.value[0].path
   }
-  
   pollTimer = setInterval(fetchLogs, 2000)
 })
 
@@ -159,24 +149,21 @@ const loadFiles = async () => {
   try {
     const res1 = await api.get('/crack/files/handshakes')
     handshakes.value = res1.data.files || []
-    
     const res2 = await api.get('/crack/files/wordlists')
     wordlists.value = res2.data.files || []
   } catch (e) {
-    console.error(e)
     ElMessage.error("文件列表加载失败")
   }
 }
 
 const startCrack = async () => {
   if (!selectedHandshake.value || !selectedWordlist.value) return ElMessage.warning("请先选择握手包和字典")
-  
   try {
+    // 这里的参数会正确传给后端的 Pydantic 模型
     const res = await api.post('/crack/start', {
       handshake_file: selectedHandshake.value,
       wordlist_file: selectedWordlist.value
     })
-    
     if (res.data.status === 'success') {
       ElMessage.success("Hashcat 任务已启动")
       logs.value = ["[SYSTEM] Initializing Hashcat..."]
@@ -190,10 +177,7 @@ const startCrack = async () => {
 }
 
 const stopCrack = async () => { 
-  try {
-      await api.post('/crack/stop')
-      ElMessage.info("正在停止任务...")
-  } catch(e) {}
+  try { await api.post('/crack/stop'); ElMessage.info("停止指令已发送") } catch(e) {}
 }
 
 const fetchLogs = async () => {
@@ -202,7 +186,6 @@ const fetchLogs = async () => {
     isRunning.value = res.data.is_running
     logs.value = res.data.logs || []
     crackStatus.value = res.data.status || {}
-    
     nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
   } catch (e) {}
 }
