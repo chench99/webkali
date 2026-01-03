@@ -1,10 +1,9 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import wifi, system, attack, crack  # <--- 1. 导入 crack
+from app.api.v1.endpoints import wifi, system, attack, crack  # <--- 必须导入 crack
 
 api_router = APIRouter()
 
-# 2. 注册路由
 api_router.include_router(wifi.router, prefix="/wifi", tags=["wifi"])
 api_router.include_router(system.router, prefix="/system", tags=["system"])
 api_router.include_router(attack.router, prefix="/attack", tags=["attack"])
-api_router.include_router(crack.router, prefix="/crack", tags=["crack"]) # <--- 3. 启用 crack 模块
+api_router.include_router(crack.router, prefix="/crack", tags=["crack"]) # <--- 必须注册 crack
