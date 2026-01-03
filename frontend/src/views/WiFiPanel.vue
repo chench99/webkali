@@ -31,8 +31,9 @@
         <div class="relative">
           <select 
             v-model="selectedInterface" 
-            class="bg-gray-800 border border-gray-600 px-3 py-1.5 rounded text-sm w-56 focus:outline-none focus:border-blue-500 transition"
+            class="bg-gray-800 border border-gray-600 px-3 py-1.5 rounded text-sm w-72 focus:outline-none focus:border-blue-500 transition font-mono"
           >
+            <option value="" disabled>请选择物理网卡...</option>
             <option v-for="iface in interfaces" :key="iface.name" :value="iface.name">
               {{ iface.display }}
             </option>
@@ -77,7 +78,10 @@
         <tbody class="divide-y divide-gray-700/50">
           <tr v-if="sortedNetworks.length === 0" class="text-center text-gray-500">
             <td colspan="7" class="p-12">
-              暂无数据，请确认 Agent 在线并点击“执行扫描”
+              <div class="flex flex-col items-center gap-2">
+                <span class="text-2xl opacity-20">📶</span>
+                <span>暂无数据，请确认 Agent 在线并点击“执行扫描”</span>
+              </div>
             </td>
           </tr>
           
@@ -85,6 +89,7 @@
             
             <td class="p-4">
               <div class="font-bold text-white">{{ net.ssid }}</div>
+              <div v-if="net.vendor && net.vendor !== 'Unknown'" class="text-[9px] text-gray-500 mt-0.5">{{ net.vendor }}</div>
             </td>
             
             <td class="p-4 font-mono text-xs text-gray-400">{{ net.bssid }}</td>
@@ -210,6 +215,7 @@ export default {
   },
   computed: {
     hasAgent() { 
+      // 只要 interfaces 数组里有东西，且不是 waiting 状态，就认为 Agent 在线
       return this.interfaces.length > 0 && this.interfaces[0].name !== 'waiting'; 
     },
     agentStatusText() {
@@ -233,9 +239,10 @@ export default {
     
     // 全局轮询器 (3秒一次)
     this.pollTimer = setInterval(() => {
+      // 只有在非扫描状态下才刷新网卡和列表，避免扫描时列表跳动
       if (!this.isScanning) {
         this.fetchInterfaces();
-        this.loadNetworks(); // 持续从数据库拉取最新数据
+        this.loadNetworks(); 
       }
       if (this.monitoringBSSID) {
         this.fetchClients();
@@ -261,7 +268,10 @@ export default {
       try {
         const res = await api.get('/wifi/interfaces');
         this.interfaces = res.data.interfaces || [];
-        if (!this.selectedInterface && this.hasAgent) this.selectedInterface = this.interfaces[0].name;
+        // 如果当前没选中网卡，且 Agent 在线，默认选中第一个
+        if (!this.selectedInterface && this.hasAgent) {
+            this.selectedInterface = this.interfaces[0].name;
+        }
       } catch {}
     },
     
@@ -287,7 +297,8 @@ export default {
             ].filter(Boolean).join('\n')
             ElMessageBox.alert(details || 'Agent 已部署，但暂未回连。', 'Agent 诊断信息', { type: 'warning' })
           }
-          this.fetchInterfaces();
+          // 部署完立即尝试拉取网卡
+          setTimeout(this.fetchInterfaces, 2000);
         } else {
           ElMessageBox.alert(res.data.message, '部署失败', { type: 'error' });
         }
