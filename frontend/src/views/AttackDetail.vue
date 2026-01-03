@@ -27,12 +27,14 @@
           <span class="text-xs font-bold text-gray-400">⚔️ 攻击网卡:</span>
           <select 
             v-model="selectedInterface"
-            class="bg-transparent text-yellow-400 text-xs font-mono focus:outline-none cursor-pointer w-32"
+            class="bg-transparent text-yellow-400 text-xs font-mono focus:outline-none cursor-pointer w-56"
           >
             <option value="" disabled>选择网卡...</option>
+            
             <option v-for="iface in interfaces" :key="iface.name" :value="iface.name">
-              {{ iface.name }}
+              {{ iface.name }} : {{ iface.driver || 'Generic' }} [{{ iface.mode === 'Monitor' ? '监听模式' : '管理模式' }}]
             </option>
+            
           </select>
         </div>
 
@@ -78,7 +80,7 @@
                   v-if="capturedFiles.cap"
                   @click="downloadFile(capturedFiles.cap)"
                   class="py-2 bg-blue-600 hover:bg-blue-500 text-white text-[10px] rounded font-bold transition flex flex-col items-center justify-center border border-blue-400/30"
-                  title="下载原始数据包 (Wireshark)"
+                  title="下载原始数据包"
                 >
                   <span class="flex items-center gap-1">📥 .CAP</span>
                   <span class="opacity-70 scale-75 font-normal">原始包</span>
@@ -88,7 +90,7 @@
                   v-if="capturedFiles.hash"
                   @click="downloadFile(capturedFiles.hash)"
                   class="py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] rounded font-bold transition flex flex-col items-center justify-center border border-purple-400/30"
-                  title="下载 Hashcat 格式 (直接跑字典)"
+                  title="下载 Hashcat 格式"
                 >
                   <span class="flex items-center gap-1">📥 .HC22000</span>
                   <span class="opacity-70 scale-75 font-normal">Hashcat</span>
@@ -112,7 +114,6 @@
             </h3>
           </div>
           <div class="p-4 space-y-3">
-            <p class="text-[10px] text-gray-500">发送解除认证帧，强制客户端断线重连。</p>
             <div class="flex items-center gap-2 mb-2">
               <label class="text-xs text-gray-400">持续时长(秒):</label>
               <input type="number" v-model="attackDuration" class="bg-black/30 border border-gray-600 rounded px-2 py-1 text-xs w-16 text-center text-white focus:border-blue-500 outline-none">
@@ -241,7 +242,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-// 引入所有 API (使用命名导入)
 import { 
   getInterfaces, 
   getWifiList, 
@@ -255,7 +255,6 @@ const route = useRoute()
 const router = useRouter()
 const bssid = route.params.bssid
 
-// 1. 状态定义
 const targetInfo = ref({
   ssid: '',
   bssid: bssid,
@@ -265,7 +264,7 @@ const targetInfo = ref({
 })
 
 const interfaces = ref([])
-const selectedInterface = ref('') // 动态网卡
+const selectedInterface = ref('') 
 const attackDuration = ref(60)
 
 const logs = ref(['[SYSTEM] 攻击控制台初始化完成。'])
@@ -274,14 +273,12 @@ const logBox = ref(null)
 const isRunning = ref(false)
 const currentAttack = ref('')
 
-// 捕获状态管理
 const captureSuccess = ref(false)
-const capturedFiles = ref({ cap: null, hash: null }) // 存储后端返回的文件名
+const capturedFiles = ref({ cap: null, hash: null })
 
 const aiResult = ref(null)
 const aiThinking = ref(false)
 
-// 2. 辅助函数
 const autoScroll = () => {
   nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 }
@@ -297,22 +294,18 @@ const addLog = (msg, type = 'info') => {
   autoScroll()
 }
 
-// 3. 下载文件
 const downloadFile = (filename) => {
   if (!filename) return
-  // 直接在新窗口打开后端下载链接
   const url = `/api/v1/attack/download/${filename}`
   window.open(url, '_blank')
 }
 
-// 4. 加载网卡列表
 const loadInterfaces = async () => {
   try {
     const res = await getInterfaces()
     if (res.data && res.data.interfaces) {
       interfaces.value = res.data.interfaces
       
-      // 智能选择 Monitor 网卡
       const monitorIface = interfaces.value.find(i => i.mode === 'Monitor' || i.name.includes('mon'))
       if (monitorIface) {
         selectedInterface.value = monitorIface.name
@@ -329,7 +322,6 @@ const loadInterfaces = async () => {
   }
 }
 
-// 5. 加载目标信息
 const loadTargetInfo = async () => {
   try {
     const res = await getWifiList()
@@ -339,7 +331,6 @@ const loadTargetInfo = async () => {
       addLog(`[INFO] 目标锁定: <span class="text-white">${target.ssid}</span>`, 'info')
       addLog(`[INFO] 信道: ${target.channel} | 加密: ${target.encryption}`, 'info')
       
-      // 信息加载成功后，自动开始 AI 分析
       if (!aiResult.value) startAIAnalysis()
     } else {
       addLog(`[WARN] 本地缓存未找到目标，使用默认参数。`, 'error')
@@ -350,7 +341,6 @@ const loadTargetInfo = async () => {
   }
 }
 
-// 6. AI 分析
 const startAIAnalysis = async () => {
   aiThinking.value = true
   addLog("[AI] 正在连接 DeepSeek 神经网络...", 'kali')
@@ -370,7 +360,6 @@ const startAIAnalysis = async () => {
   }
 }
 
-// 7. 核心攻击逻辑
 const runAttack = async (type) => {
   if (!selectedInterface.value) {
     addLog(`[ERROR] 请先在右上角选择攻击网卡！`, 'error')
@@ -381,7 +370,6 @@ const runAttack = async (type) => {
   currentAttack.value = type
   
   try {
-    // === Deauth 攻击 ===
     if (type === 'deauth') {
       addLog(`[CMD] 启动 Deauth 干扰... 目标: ${targetInfo.value.bssid}`, 'cmd')
       addLog(`[CFG] 网卡: ${selectedInterface.value} | 时长: ${attackDuration.value}s`, 'kali')
@@ -395,7 +383,6 @@ const runAttack = async (type) => {
       
       addLog("[Kali] 攻击指令已下发 (PID: Running)。", 'success')
       
-    // === 握手包捕获 ===
     } else if (type === 'capture') {
       addLog(`[CMD] 启动握手包捕获序列 (耗时约40秒)...`, 'cmd')
       addLog(`[INFO] 阶段: 锁定信道 -> 诱骗重连 -> 抓包`, 'kali')
@@ -404,13 +391,12 @@ const runAttack = async (type) => {
         bssid: targetInfo.value.bssid,
         interface: selectedInterface.value,
         channel: String(targetInfo.value.channel),
-        duration: 35 // 给后端 35秒执行时间
+        duration: 35
       })
       
       if (res.data.status === 'success') {
         addLog(`[SUCCESS] ✅ 握手包捕获成功！`, 'success')
         
-        // 存储文件名
         capturedFiles.value.cap = res.data.cap_file
         capturedFiles.value.hash = res.data.hash_file
         
@@ -420,13 +406,12 @@ const runAttack = async (type) => {
           addLog(`[WARN] 未生成 .hc22000 文件 (Kali 可能缺失 hcxtools)`, 'error')
         }
         
-        captureSuccess.value = true // 切换 UI 状态
+        captureSuccess.value = true
       } else {
         addLog(`[FAIL] 捕获失败: ${res.data.msg}`, 'error')
         if (res.data.debug) addLog(`[DEBUG] ${res.data.debug}`, 'kali')
       }
 
-    // === 钓鱼热点 ===
     } else if (type === 'eviltwin') {
       if(!confirm("⚠️ 警告：启动双子热点将占用网卡，可能导致 SSH 短暂断开。是否继续？")) {
         isRunning.value = false
@@ -444,20 +429,17 @@ const runAttack = async (type) => {
     addLog(`[ERROR] 请求异常: ${e.message}`, 'error')
   } finally {
     if (type !== 'deauth') isRunning.value = false
-    // Deauth 立即释放按钮
     setTimeout(() => { if (type === 'deauth') isRunning.value = false }, 2000)
   }
 }
 
-// 8. 生命周期挂载
 onMounted(async () => {
-  await loadInterfaces() // 先加载网卡
-  await loadTargetInfo() // 再加载目标
+  await loadInterfaces() 
+  await loadTargetInfo()
 })
 </script>
 
 <style scoped>
-/* 滚动条美化 */
 .scrollbar-thin::-webkit-scrollbar { width: 4px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: #111827; }
 .scrollbar-thin::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
