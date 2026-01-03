@@ -1,78 +1,125 @@
-import psutil
 from fastapi import APIRouter
 from app.core.ssh_manager import ssh_client
+import psutil
 
 router = APIRouter()
 
 
+# ==========================================
+# 1. 系统状态监控 (原功能)
+# ==========================================
 @router.get("/status")
-def get_system_status():
-    """获取 Windows (本机) 和 Kali (远程) 的状态"""
+async def get_system_status():
+    """获取宿主机状态和 Kali 连接状态"""
+    # 获取本机资源
+    cpu_usage = psutil.cpu_percent(interval=None)
+    ram_usage = psutil.virtual_memory().percent
 
-    # 1. 获取 Windows 状态
-    win_stats = {
-        "cpu": psutil.cpu_percent(),
-        "ram": psutil.virtual_memory().percent,
-        "gpu_temp": "N/A"
-    }
+    # 检查 SSH 连接是否存活
+    kali_online = False
+    if ssh_client.client:
+        if ssh_client.client.get_transport() and ssh_client.client.get_transport().is_active():
+            kali_online = True
+        else:
+            ssh_client.client = None  # 连接已断开
 
-    # 2. 获取 Kali 状态 (默认离线)
-    kali_stats = {
-        "online": False,
-        "cpu": 0,
-        "ram": 0
-    }
+    # 如果在线，尝试获取 Kali 的负载 (可选)
+    kali_cpu = 0
+    kali_ram = 0
+    if kali_online:
+        try:
+            # 简单的获取 Kali 负载命令
+            stdin, stdout, stderr = ssh_client.exec_command(
+                "grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}'")
+            k_cpu = stdout.read().decode().strip()
+            kali_cpu = int(float(k_cpu)) if k_cpu else 0
 
-    try:
-        # 如果 SSH 没连，尝试连一下
-        if not ssh_client.client or not ssh_client.client.get_transport() or not ssh_client.client.get_transport().is_active():
-            # print("DEBUG: SSH 连接断开，正在重连...")
-            ssh_client.connect()
-
-        if ssh_client.client:
-            # === 第一层检测：极简存活检测 ===
-            # 只要能执行 echo，就说明在线
-            try:
-                stdin, stdout, stderr = ssh_client.exec_command("echo online")
-                check_online = stdout.read().decode().strip()
-                if "online" in check_online:
-                    kali_stats["online"] = True
-            except Exception as e:
-                print(f"DEBUG: 存活检测失败 -> {e}")
-
-            # === 第二层检测：只有在线才去获取详细数据 ===
-            if kali_stats["online"]:
-                try:
-                    # 获取负载和内存
-                    cmd = "cat /proc/loadavg && free -m"
-                    stdin, stdout, stderr = ssh_client.exec_command(cmd)
-                    output = stdout.read().decode().strip().split('\n')
-
-                    # 打印 Kali 回复的内容，方便你看有没有数据
-                    # print(f"DEBUG: Kali Output Lines -> {len(output)}")
-
-                    if len(output) >= 2:
-                        # 解析 CPU (Load Average)
-                        load_avg = float(output[0].split()[0])
-                        kali_stats["cpu"] = min(round(load_avg * 100 / 4, 1), 100)
-
-                        # 解析内存 (查找包含 Mem: 的行)
-                        for line in output:
-                            if "Mem:" in line:
-                                parts = line.split()
-                                # parts[0]=Mem:, parts[1]=total, parts[2]=used
-                                total = int(parts[1])
-                                used = int(parts[2])
-                                kali_stats["ram"] = round((used / total) * 100, 1)
-                                break
-                except Exception as e:
-                    print(f"DEBUG: 获取详细资源数据失败 (但不影响在线状态) -> {e}")
-
-    except Exception as e:
-        print(f"❌ SSH 异常: {e}")
-        ssh_client.client = None
+            stdin, stdout, stderr = ssh_client.exec_command("free | grep Mem | awk '{print $3/$2 * 100.0}'")
+            k_ram = stdout.read().decode().strip()
+            kali_ram = int(float(k_ram)) if k_ram else 0
+        except:
+            pass
 
     return {
-        "host": win_stats,
-        "kali": kali_stats
+        "host": {
+            "cpu": cpu_usage,
+            "ram": ram_usage
+        },
+        "kali": {
+            "online": kali_online,
+            "cpu": kali_cpu,
+            "ram": kali_ram
+        }
     }
+
+
+# ==========================================
+# 2. 网卡详情获取 (Evil Twin 增强功能)
+# ==========================================
+@router.get("/interfaces")
+async def get_kali_interfaces():
+    """
+    执行 'airmon-ng' 获取网卡列表和芯片信息
+    返回格式: [{"name": "wlan0", "driver": "mt7601u", "chipset": "MediaTek...", "label": "..."}]
+    """
+    if not ssh_client.client:
+        try:
+            ssh_client.connect()
+        except:
+            return {"status": "error", "data": []}
+
+    try:
+        # airmon-ng 的输出包含 PHY, Interface, Driver, Chipset
+        # 使用 airmon-ng 命令比 iwconfig 能看到更详细的芯片信息
+        stdin, stdout, stderr = ssh_client.exec_command("airmon-ng")
+        output = stdout.read().decode()
+
+        interfaces = []
+        lines = output.splitlines()
+
+        # 解析输出
+        for line in lines:
+            # 跳过空行和标题行
+            if not line or "PHY" in line or "Interface" in line: continue
+
+            # airmon-ng 输出是用 tab 分隔的
+            parts = line.split('\t')
+            # 过滤掉空字符串元素
+            parts = [p for p in parts if p]
+
+            # 确保解析正确 (通常至少有 Interface, Driver, Chipset)
+            if len(parts) >= 3:
+                # 某些版本格式: [PHY, Interface, Driver, Chipset]
+                # 有些版本可能只有 [Interface, Driver, Chipset]
+                # 我们主要找 Interface 名称 (wlanX, monX)
+
+                iface_name = ""
+                driver = ""
+                chipset = ""
+
+                # 简单的启发式查找
+                for part in parts:
+                    if part.startswith("wlan") or part.startswith("mon"):
+                        iface_name = part
+                        break
+
+                # 如果没找到网卡名，尝试按位置取
+                if not iface_name and len(parts) > 1:
+                    iface_name = parts[1]  # 假设第二列是接口名
+
+                if len(parts) > 2: driver = parts[2]
+                if len(parts) > 3: chipset = parts[3]
+
+                # 排除非无线网卡
+                if iface_name and "eth" not in iface_name and "lo" not in iface_name:
+                    interfaces.append({
+                        "name": iface_name,
+                        "driver": driver,
+                        "chipset": chipset,
+                        # 前端下拉框显示的标签
+                        "label": f"{iface_name}: {chipset} ({driver})"
+                    })
+
+        return {"status": "success", "data": interfaces}
+    except Exception as e:
+        return {"status": "error", "msg": str(e), "data": []}
