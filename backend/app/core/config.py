@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # 您可以在 .env 中设置 WORDLIST_DIR=G:/xxx 来覆盖它
     WORDLIST_DIR: str = "wordlists"
 
+    # 🔥🔥🔥 关键新增：Hashcat 路径配置 🔥🔥🔥
+    # 如果 .env 里没写，默认为 "hashcat" (尝试系统命令)
+    # 如果 .env 里写了 HASHCAT_PATH=G:/tools/hashcat.exe，这里就会自动读取
+    HASHCAT_PATH: str = "hashcat"
+
     # --- AI 配置 (DeepSeek) ---
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
@@ -72,6 +77,7 @@ class Settings(BaseSettings):
 try:
     settings = Settings()
     print("[Config] Configuration loaded successfully.")
+    print(f"[Config] Hashcat Path: {settings.HASHCAT_PATH}") # 打印一下方便确认
 except Exception as e:
     print(f"[Config] ❌ Critical Error: Failed to load settings.")
     print(f"Error details: {e}")
