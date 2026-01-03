@@ -31,7 +31,7 @@
           >
             <option value="" disabled>选择网卡...</option>
             <option v-for="iface in interfaces" :key="iface.name" :value="iface.name">
-              {{ iface.display || iface.name }}
+              {{ iface.name }}
             </option>
           </select>
         </div>
