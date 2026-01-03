@@ -1,10 +1,12 @@
 from fastapi import APIRouter
 from pathlib import Path
 from pydantic import BaseModel
-from app.core.config import settings  # <--- 这里现在包含了您的 HASHCAT_PATH
+from app.core.config import settings
 import os
 import subprocess
 import tempfile
+import shutil
+import re  # <--- 新增正则模块，用于精准解析
 
 router = APIRouter()
 
@@ -52,10 +54,8 @@ async def get_wordlists():
     wordlist_path = Path(settings.WORDLIST_DIR)
     if not wordlist_path.is_absolute():
         wordlist_path = BACKEND_DIR / settings.WORDLIST_DIR
-
     if not wordlist_path.exists():
         return {"status": "error", "msg": f"字典目录不存在: {wordlist_path}", "files": []}
-
     files = []
     try:
         for f in wordlist_path.iterdir():
@@ -70,7 +70,7 @@ async def get_wordlists():
     return {"status": "success", "files": files}
 
 
-# 3. 启动破解 (关键修复)
+# 3. 启动破解
 @router.post("/start")
 async def start_crack(req: CrackRequest):
     if state.is_running:
@@ -80,45 +80,44 @@ async def start_crack(req: CrackRequest):
     wordlist_file = req.wordlist_file
 
     if not os.path.exists(handshake_file):
-        return {"status": "error", "message": f"握手包不存在: {handshake_file}"}
+        return {"status": "error", "message": "握手包不存在"}
     if not os.path.exists(wordlist_file):
-        return {"status": "error", "message": f"字典不存在: {wordlist_file}"}
+        return {"status": "error", "message": "字典不存在"}
 
-    # 🔥🔥🔥 核心修改：直接从配置读取您定义的路径 🔥🔥🔥
+    # 自动定位 Hashcat
     hashcat_cmd = settings.HASHCAT_PATH
-
-    # 自动计算工作目录 (解决 OpenCL not found 问题)
-    # 如果您配置的是 "hashcat" (命令)，工作目录就为 None (由系统决定)
-    # 如果您配置的是 "G:\tools\hashcat.exe" (绝对路径)，工作目录就是 "G:\tools"
     working_dir = None
-    if os.path.isabs(hashcat_cmd):
+
+    # 尝试寻找真实路径
+    exe_path = shutil.which("hashcat")
+    if exe_path:
+        working_dir = os.path.dirname(exe_path)
+    elif os.path.exists(hashcat_cmd) and os.path.isabs(hashcat_cmd):
         working_dir = os.path.dirname(hashcat_cmd)
 
-    # 打印调试信息，让您知道它到底读到了什么
-    print(f"[DEBUG] Configured Hashcat Path: {hashcat_cmd}")
-    print(f"[DEBUG] Calculated Working Dir: {working_dir}")
-
+    # 构造命令
     cmd = [
         hashcat_cmd,
         "-m", "22000",
         "-a", "0",
         "-w", "3",
         "--status",
-        "--status-timer", "1",
+        "--status-timer", "1",  # 每秒刷新状态
         "--force",
-        "-S",  # 允许慢速核心
+        "-S",  # 允许慢速核心(CPU)
         "-o", str(state.output_file),
         handshake_file,
         wordlist_file
     ]
 
     try:
+        # 清空旧日志
         with open(state.log_file, "w") as f:
-            f.write(f"[SYSTEM] Starting Task...\nCMD: {' '.join(cmd)}\nCWD: {working_dir}\n")
+            f.write(f"[SYSTEM] Starting Task...\nCMD: {' '.join(cmd)}\n")
 
         state.process = subprocess.Popen(
             cmd,
-            cwd=working_dir,  # 🔥 关键：在这里切换目录
+            cwd=working_dir,
             stdout=open(state.log_file, "a"),
             stderr=subprocess.STDOUT,
             text=True
@@ -142,33 +141,94 @@ async def stop_crack():
     return {"status": "error", "message": "无运行任务"}
 
 
-# 5. 日志接口
+# 5. 日志接口 (🔥 核心升级：增强解析逻辑)
 @router.get("/logs")
 async def get_logs():
     logs = []
-    status = {"state": "Idle", "speed": "0 H/s", "progress": 0}
+    status = {
+        "state": "Idle",
+        "speed": "0 H/s",
+        "progress": 0,
+        "recovered": "0/0",
+        "eta": "计算中..."
+    }
 
+    # 检查进程死活
     if state.process and state.process.poll() is not None:
         state.is_running = False
 
     if state.log_file.exists():
         try:
+            # 1. 读取更多内容 (最后 8KB)，防止漏掉状态块
+            file_size = state.log_file.stat().st_size
+            read_size = min(file_size, 8192)  # 读取最后 8KB
+
             with open(state.log_file, "r", errors='ignore') as f:
-                lines = f.readlines()
-                logs = [l.strip() for l in lines[-50:]]
-                for l in lines[-30:]:
-                    if "Status..........." in l: status["state"] = l.split(":")[1].strip()
-                    if "Speed.#1........." in l: status["speed"] = l.split(":")[1].strip()
-                    if "Progress........." in l:
-                        parts = l.split(":")[1].split("/")
+                if file_size > read_size:
+                    f.seek(file_size - read_size)
+                content = f.read()
+
+                # 分割日志用于前端显示 (只取最后 50 行)
+                lines = content.splitlines()
+                logs = lines[-50:]
+
+                # 2. 倒序解析状态 (找到最新的那个状态块)
+                # Hashcat 输出示例:
+                # Speed.#1.........:    15000 H/s ...
+                # Time.Estimated...: Sat Jan 03 17:00:00 2026 (8 mins, 40 secs)
+
+                reversed_lines = list(reversed(lines))
+
+                # === 提取速度 (Speed) ===
+                for line in reversed_lines:
+                    if "Speed.#1" in line:
+                        # 格式: Speed.#1.........:    15000 H/s (5.33ms)...
+                        parts = line.split(":")
                         if len(parts) > 1:
-                            try:
-                                cur = int(parts[0].strip())
-                                tot = int(parts[1].split("(")[0].strip())
-                                if tot > 0: status["progress"] = round(cur / tot * 100, 1)
-                            except:
-                                pass
-        except:
-            pass
+                            # 取 "15000 H/s"
+                            status["speed"] = parts[1].split("(")[0].strip()
+                        break
+
+                # === 提取剩余时间 (ETA) ===
+                for line in reversed_lines:
+                    if "Time.Estimated" in line:
+                        # 格式: ... (8 mins, 40 secs)
+                        # 我们提取括号里的内容
+                        if "(" in line:
+                            status["eta"] = line.split("(")[-1].strip().rstrip(")")
+                        else:
+                            # 没括号可能是不显示时间或刚开始
+                            status["eta"] = line.split(":")[-1].strip()
+                        break
+
+                # === 提取状态 (State) ===
+                for line in reversed_lines:
+                    if "Status..........." in line:
+                        status["state"] = line.split(":")[1].strip()
+                        break
+
+                # === 提取恢复进度 (Recovered) ===
+                for line in reversed_lines:
+                    if "Recovered........" in line:
+                        status["recovered"] = line.split(":")[1].split("(")[0].strip()
+                        break
+
+                # === 提取进度百分比 (Progress) ===
+                for line in reversed_lines:
+                    if "Progress........." in line:
+                        # 格式: 123/456 (10.00%)
+                        try:
+                            parts = line.split(":")[1].split("/")
+                            if len(parts) > 1:
+                                current = int(parts[0].strip())
+                                total = int(parts[1].split("(")[0].strip())
+                                if total > 0:
+                                    status["progress"] = round((current / total) * 100, 2)
+                        except:
+                            pass
+                        break
+
+        except Exception as e:
+            print(f"[ERROR] Log parsing failed: {e}")
 
     return {"status": status, "is_running": state.is_running, "logs": logs}
