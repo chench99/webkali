@@ -1,10 +1,10 @@
 from fastapi import APIRouter
 from pathlib import Path
 from pydantic import BaseModel
-from app.core.config import settings
+from app.core.config import settings  # <--- 这里现在包含了您的 HASHCAT_PATH
 import os
 import subprocess
-import tempfile  # <--- 关键引入：自动获取系统临时目录
+import tempfile
 
 router = APIRouter()
 
@@ -13,7 +13,6 @@ router = APIRouter()
 class CrackState:
     process = None
     is_running = False
-    # 使用 tempfile.gettempdir() 自动获取 Windows/Linux 正确的临时路径
     log_file = Path(tempfile.gettempdir()) / "webkali_hashcat.log"
     output_file = Path(tempfile.gettempdir()) / "webkali_cracked.txt"
 
@@ -21,19 +20,17 @@ class CrackState:
 state = CrackState()
 
 # === 路径配置 ===
-# 逻辑：当前文件 -> endpoints -> v1 -> api -> app -> backend
 BACKEND_DIR = Path(__file__).resolve().parents[4]
 HANDSHAKE_DIR = BACKEND_DIR / "captures"
 HANDSHAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# === 请求模型 ===
 class CrackRequest(BaseModel):
     handshake_file: str
     wordlist_file: str
 
 
-# 1. 获取握手包接口
+# 1. 获取握手包
 @router.get("/files/handshakes")
 async def get_handshakes():
     files = []
@@ -49,7 +46,7 @@ async def get_handshakes():
     return {"status": "success", "files": files}
 
 
-# 2. 获取字典接口
+# 2. 获取字典
 @router.get("/files/wordlists")
 async def get_wordlists():
     wordlist_path = Path(settings.WORDLIST_DIR)
@@ -70,11 +67,10 @@ async def get_wordlists():
                 })
     except Exception as e:
         return {"status": "error", "msg": str(e), "files": []}
-
     return {"status": "success", "files": files}
 
 
-# 3. 启动破解接口
+# 3. 启动破解 (关键修复)
 @router.post("/start")
 async def start_crack(req: CrackRequest):
     if state.is_running:
@@ -88,29 +84,41 @@ async def start_crack(req: CrackRequest):
     if not os.path.exists(wordlist_file):
         return {"status": "error", "message": f"字典不存在: {wordlist_file}"}
 
-    # 构造 Hashcat 命令
-    # 注意：Windows下运行 Hashcat 需要确保 'hashcat' 已添加到环境变量 PATH 中
-    # 或者将下面的 "hashcat" 改为绝对路径，如 "G:\\tools\\hashcat.exe"
+    # 🔥🔥🔥 核心修改：直接从配置读取您定义的路径 🔥🔥🔥
+    hashcat_cmd = settings.HASHCAT_PATH
+
+    # 自动计算工作目录 (解决 OpenCL not found 问题)
+    # 如果您配置的是 "hashcat" (命令)，工作目录就为 None (由系统决定)
+    # 如果您配置的是 "G:\tools\hashcat.exe" (绝对路径)，工作目录就是 "G:\tools"
+    working_dir = None
+    if os.path.isabs(hashcat_cmd):
+        working_dir = os.path.dirname(hashcat_cmd)
+
+    # 打印调试信息，让您知道它到底读到了什么
+    print(f"[DEBUG] Configured Hashcat Path: {hashcat_cmd}")
+    print(f"[DEBUG] Calculated Working Dir: {working_dir}")
+
     cmd = [
-        "hashcat",
+        hashcat_cmd,
         "-m", "22000",
         "-a", "0",
         "-w", "3",
         "--status",
         "--status-timer", "1",
         "--force",
-        "-o", str(state.output_file),  # 使用兼容路径
+        "-S",  # 允许慢速核心
+        "-o", str(state.output_file),
         handshake_file,
         wordlist_file
     ]
 
     try:
-        # 确保日志文件可以被创建
         with open(state.log_file, "w") as f:
-            f.write(f"[SYSTEM] Starting Task...\nCMD: {' '.join(cmd)}\n")
+            f.write(f"[SYSTEM] Starting Task...\nCMD: {' '.join(cmd)}\nCWD: {working_dir}\n")
 
         state.process = subprocess.Popen(
             cmd,
+            cwd=working_dir,  # 🔥 关键：在这里切换目录
             stdout=open(state.log_file, "a"),
             stderr=subprocess.STDOUT,
             text=True
@@ -118,7 +126,7 @@ async def start_crack(req: CrackRequest):
         state.is_running = True
         return {"status": "success", "pid": state.process.pid}
     except Exception as e:
-        return {"status": "error", "message": f"启动失败: {str(e)}"}
+        return {"status": "error", "message": f"启动异常: {str(e)}"}
 
 
 # 4. 停止接口
@@ -148,7 +156,6 @@ async def get_logs():
             with open(state.log_file, "r", errors='ignore') as f:
                 lines = f.readlines()
                 logs = [l.strip() for l in lines[-50:]]
-
                 for l in lines[-30:]:
                     if "Status..........." in l: status["state"] = l.split(":")[1].strip()
                     if "Speed.#1........." in l: status["speed"] = l.split(":")[1].strip()
@@ -158,8 +165,7 @@ async def get_logs():
                             try:
                                 cur = int(parts[0].strip())
                                 tot = int(parts[1].split("(")[0].strip())
-                                if tot > 0:
-                                    status["progress"] = round(cur / tot * 100, 1)
+                                if tot > 0: status["progress"] = round(cur / tot * 100, 1)
                             except:
                                 pass
         except:
