@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from pathlib import Path
+from pydantic import BaseModel  # <--- 必须导入这个
 from app.core.config import settings
 import os
 import subprocess
@@ -16,48 +17,38 @@ class CrackState:
 
 state = CrackState()
 
-# === 1. 路径修正 (关键！) ===
-# 逻辑：当前文件 -> endpoints -> v1 -> api -> app -> backend (项目根目录)
+# 路径配置
 BACKEND_DIR = Path(__file__).resolve().parents[4]
-
-# 握手包目录：必须与 attack.py 中的下载路径保持一致 (backend/captures)
 HANDSHAKE_DIR = BACKEND_DIR / "captures"
-
-# 确保目录存在
 HANDSHAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# === 2. 补全缺失的接口：获取握手包 ===
+# === 🔥 关键新增：定义请求模型 ===
+class CrackRequest(BaseModel):
+    handshake_file: str
+    wordlist_file: str
+
+
+# 1. 获取握手包
 @router.get("/files/handshakes")
 async def get_handshakes():
-    """列出 captures 目录下的所有握手包"""
     files = []
-
-    # 调试打印
-    print(f"[DEBUG] Searching handshakes in: {HANDSHAKE_DIR}")
-
     if HANDSHAKE_DIR.exists():
         for f in HANDSHAKE_DIR.iterdir():
-            # 只显示 .hc22000 和 .cap/.pcap
             if f.is_file() and f.suffix in ['.hc22000', '.cap', '.pcap']:
                 files.append({
                     "name": f.name,
-                    "path": str(f.resolve()),
+                    "path": str(f.resolve()),  # 绝对路径
                     "size": f"{f.stat().st_size / 1024:.2f} KB"
                 })
-
-    # 按时间倒序排列
     files.sort(key=lambda x: os.path.getmtime(x['path']), reverse=True)
     return {"status": "success", "files": files}
 
 
-# === 3. 获取字典接口 ===
+# 2. 获取字典
 @router.get("/files/wordlists")
 async def get_wordlists():
-    """列出字典文件"""
     wordlist_path = Path(settings.WORDLIST_DIR)
-
-    # 相对路径转绝对路径
     if not wordlist_path.is_absolute():
         wordlist_path = BACKEND_DIR / settings.WORDLIST_DIR
 
@@ -79,34 +70,39 @@ async def get_wordlists():
     return {"status": "success", "dir": str(wordlist_path), "files": files}
 
 
-# === 4. 启动破解接口 ===
+# 3. 启动破解 (已修复参数接收)
 @router.post("/start")
-async def start_crack(handshake_file: str = "", wordlist_file: str = ""):
+async def start_crack(req: CrackRequest):  # <--- 这里改成了接收对象 req
     """启动 Hashcat 破解任务"""
     if state.is_running:
         return {"status": "error", "message": "任务已在运行中"}
 
-    if not os.path.exists(handshake_file):
-        return {"status": "error", "message": f"握手包文件不存在: {handshake_file}"}
-    if not os.path.exists(wordlist_file):
-        return {"status": "error", "message": f"字典文件不存在: {wordlist_file}"}
+    # 从对象中提取参数
+    handshake_file = req.handshake_file
+    wordlist_file = req.wordlist_file
+
+    print(f"[DEBUG] Receive Start Crack: \nHandshake: {handshake_file}\nWordlist: {wordlist_file}")
+
+    if not handshake_file or not os.path.exists(handshake_file):
+        return {"status": "error", "message": f"握手包路径无效: {handshake_file}"}
+    if not wordlist_file or not os.path.exists(wordlist_file):
+        return {"status": "error", "message": f"字典路径无效: {wordlist_file}"}
 
     # Hashcat 命令
     cmd = [
         "hashcat",
-        "-m", "22000",  # WPA-PBKDF2-PMKID+EAPOL
-        "-a", "0",  # 字典模式
-        "-w", "3",  # 高性能模式
+        "-m", "22000",
+        "-a", "0",
+        "-w", "3",
         "--status",
         "--status-timer", "1",
-        "--force",  # 虚拟机必须加
+        "--force",
         "-o", "/tmp/cracked.txt",
         handshake_file,
         wordlist_file
     ]
 
     try:
-        # 重置日志
         with open(state.log_file, "w") as f:
             f.write(f"[SYSTEM] Starting Hashcat...\nCMD: {' '.join(cmd)}\n")
 
@@ -122,7 +118,7 @@ async def start_crack(handshake_file: str = "", wordlist_file: str = ""):
         return {"status": "error", "message": str(e)}
 
 
-# === 5. 停止与日志接口 ===
+# 4. 停止任务
 @router.post("/stop")
 async def stop_crack():
     if state.process:
@@ -135,6 +131,7 @@ async def stop_crack():
     return {"status": "error", "message": "无运行任务"}
 
 
+# 5. 获取日志
 @router.get("/logs")
 async def get_logs():
     logs = []
