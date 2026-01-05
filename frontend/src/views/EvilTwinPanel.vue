@@ -6,7 +6,13 @@
         <span class="text-2xl text-purple-400">😈</span>
         <h1 class="text-xl font-bold text-white tracking-wider">Evil Twin 双子攻击配置</h1>
       </div>
-      <button @click="$router.push('/')" class="px-4 py-2 border border-gray-600 rounded hover:bg-gray-700 text-sm">返回首页</button>
+      <div class="flex items-center gap-4">
+        <div v-if="isRunning" class="flex items-center gap-2 px-3 py-1 bg-green-900/30 border border-green-500 rounded text-green-400 text-xs animate-pulse">
+          <span class="w-2 h-2 rounded-full bg-green-500"></span>
+          ATTACKING
+        </div>
+        <button @click="$router.push('/')" class="px-4 py-2 border border-gray-600 rounded hover:bg-gray-700 text-sm">返回首页</button>
+      </div>
     </header>
 
     <div class="flex-1 grid grid-cols-12 gap-6">
@@ -111,17 +117,17 @@
         <div class="bg-[#1f2937] border border-gray-700 rounded-xl p-6 shadow-lg flex-1 flex flex-col min-h-[300px]">
           <h3 class="text-green-400 font-bold mb-4 border-b border-gray-700 pb-2 flex justify-between items-center">
             <span class="flex items-center gap-2">🔑 捕获凭证 (Credentials) <span class="text-xs bg-green-900 px-2 py-0.5 rounded text-green-300">{{ capturedCreds.length }}</span></span>
-            <span v-if="isRunning" class="text-xs animate-pulse text-green-500 flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500"></span> 监听中...</span>
+            <span v-if="isRunning" class="text-xs text-gray-400">正在监听 80 端口...</span>
           </h3>
           
           <div class="flex-1 overflow-y-auto custom-scrollbar bg-black/30 rounded border border-gray-700 p-4">
             <div v-if="capturedCreds.length === 0" class="h-full flex flex-col items-center justify-center text-gray-600 opacity-50">
               <span class="text-5xl mb-4">🕸️</span>
               <p class="text-sm">等待鱼儿上钩...</p>
-              <p class="text-xs mt-2">当受害者连接热点并输入密码时显示</p>
+              <p class="text-xs mt-2">当受害者连接热点并提交表单时显示</p>
             </div>
             <div v-else class="space-y-3">
-              <div v-for="(cred, index) in capturedCreds" :key="index" class="bg-green-900/20 border border-green-500/30 p-3 rounded text-green-300 font-mono text-sm break-all shadow-sm flex items-start gap-2">
+              <div v-for="(cred, index) in capturedCreds" :key="index" class="bg-green-900/20 border border-green-500/30 p-3 rounded text-green-300 font-mono text-sm break-all shadow-sm flex items-start gap-2 animate-in fade-in slide-in-from-bottom-2">
                 <span class="text-green-500 mt-0.5">➜</span>
                 <span>{{ cred }}</span>
               </div>
@@ -132,13 +138,14 @@
         <div class="bg-black rounded-xl border border-gray-700 p-4 h-64 flex flex-col font-mono text-xs shadow-inner relative">
           <div class="text-gray-500 border-b border-gray-800 pb-2 mb-2 flex justify-between uppercase tracking-widest text-[10px]">
             <span>System & Attack Logs</span>
-            <span v-if="isRunning" class="text-purple-400">LIVE</span>
+            <span v-if="isRunning" class="text-purple-400 flex items-center gap-1"><span class="w-1.5 h-1.5 bg-purple-500 rounded-full animate-ping"></span> LIVE</span>
           </div>
           <div class="flex-1 overflow-y-auto space-y-1 custom-scrollbar" ref="logRef">
-            <div v-for="(log, i) in logs" :key="i" class="break-words font-mono">
+            <div v-for="(log, i) in logs" :key="i" class="break-words font-mono hover:bg-gray-900/50 px-1 rounded">
               <span v-if="log.includes('[SYSTEM]')" class="text-blue-400 font-bold">{{ log }}</span>
               <span v-else-if="log.includes('Sending')" class="text-red-400/80">{{ log }}</span>
               <span v-else-if="log.includes('Hostapd')" class="text-purple-400">{{ log }}</span>
+              <span v-else-if="log.includes('捕获')" class="text-green-400 font-bold bg-green-900/20">{{ log }}</span>
               <span v-else class="text-gray-500">{{ log }}</span>
             </div>
             <div v-if="logs.length === 0" class="text-gray-700 italic text-center mt-10">Waiting for logs...</div>
@@ -177,12 +184,12 @@ const form = ref({
   bssid: '',
   ssid: '',
   channel: '6',
-  duration: 300,      // 此参数在 Evil Twin 模式下会被后端忽略强制为0(无限)
+  duration: 0,        // Evil Twin 模式下固定为 0
   template_html: ''
 })
 
 const addLog = (msg) => {
-  if (logs.value.length > 200) logs.value.shift() // 限制日志长度
+  if (logs.value.length > 200) logs.value.shift()
   logs.value.push(msg)
   nextTick(() => { if (logRef.value) logRef.value.scrollTop = logRef.value.scrollHeight })
 }
@@ -248,6 +255,7 @@ const startAttack = async () => {
       addLog(`[SYSTEM] 攻击已启动！请观察下方 Deauth 日志...`)
       ElMessage.success("攻击已启动")
       // 启动轮询
+      if(pollTimer) clearInterval(pollTimer)
       pollTimer = setInterval(fetchDataLoop, 2000)
     }
   } catch (e) {
@@ -262,7 +270,9 @@ const stopAttack = async () => {
     isRunning.value = false
     addLog("[SYSTEM] 攻击已停止。")
     if (pollTimer) clearInterval(pollTimer)
-  } catch (e) {}
+  } catch (e) {
+    ElMessage.error("停止失败: " + e.message)
+  }
 }
 
 // 轮询数据 (日志 + 密码)
@@ -277,21 +287,21 @@ const fetchDataLoop = async () => {
         if (!capturedCreds.value.includes(c)) {
           capturedCreds.value.push(c)
           ElMessage.success("🔥 捕获到密码！")
-          // 播放提示音或高亮
+          addLog(`[LOOT] 捕获新凭证: ${c}`)
         }
       })
     }
   } catch (e) {}
 
-  // 2. 获取日志 (重要：为了看踢人效果)
+  // 2. 获取日志
   try {
     const res = await api.get('/attack/eviltwin/logs')
     if (res.data.status === 'success' && res.data.logs) {
       const newLogs = res.data.logs
-      // 过滤重复日志，只显示最新的动态
       newLogs.forEach(log => {
-        // 只添加最后一条日志不一样的，防止刷屏太快
-        if (logs.value[logs.value.length - 1] !== log) {
+        // 简单去重：如果最后一条日志不完全一样，才添加
+        const lastLog = logs.value[logs.value.length - 1]
+        if (lastLog !== log) {
            addLog(log)
         }
       })
