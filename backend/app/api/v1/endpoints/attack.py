@@ -112,7 +112,7 @@ async def start_deauth_attack(req: AttackRequest):
 
 
 # ==========================================
-# 5. 核心攻击功能：握手包捕获
+# 5. 核心攻击功能：握手包捕获 (已修复超时问题)
 # ==========================================
 @router.post("/handshake")
 async def start_handshake_capture(req: AttackRequest):
@@ -135,7 +135,12 @@ async def start_handshake_capture(req: AttackRequest):
     cmd = f"python3 {remote_path} handshake --bssid {req.bssid} --interface {req.interface} --channel {req.channel} --duration {req.duration}"
 
     try:
-        stdin, stdout, stderr = ssh_client.exec_command(cmd)
+        # 【关键修复】增加 timeout 和 get_pty=True
+        # timeout 设置为 攻击时长 + 30秒冗余，防止 SSH 提前断开
+        # get_pty=True 确保能拿到 Python 的实时 print 输出（否则 stdout 可能为空）
+        timeout_val = int(req.duration) + 30
+        stdin, stdout, stderr = ssh_client.exec_command(cmd, timeout=timeout_val, get_pty=True)
+
         output = stdout.read().decode()
 
         response_data = {"status": "failed", "msg": "未捕获到握手包", "debug": output}
@@ -156,6 +161,7 @@ async def start_handshake_capture(req: AttackRequest):
 
                 # 检查远程是否存在
                 _in, _out, _err = ssh_client.exec_command(f"ls {remote_file}")
+                # ls 成功时 _err 应该为空，或者 output 包含文件名
                 if not _err.read():
                     if ssh_client.download_file(remote_file, str(local_dir / local_file)):
                         response_data["status"] = "success"
