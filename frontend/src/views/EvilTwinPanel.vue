@@ -6,7 +6,12 @@
         <span class="text-2xl text-purple-400">😈</span>
         <h1 class="text-xl font-bold text-white tracking-wider">Evil Twin 双子攻击配置</h1>
       </div>
-      <button @click="$router.push('/')" class="px-4 py-2 border border-gray-600 rounded hover:bg-gray-700 text-sm">返回首页</button>
+      <div class="flex items-center gap-4">
+        <span v-if="isRunning" class="text-xs text-green-400 animate-pulse flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-green-500"></span> 攻击运行中
+        </span>
+        <button @click="$router.push('/')" class="px-4 py-2 border border-gray-600 rounded hover:bg-gray-700 text-sm">返回首页</button>
+      </div>
     </header>
 
     <div class="flex-1 grid grid-cols-12 gap-6">
