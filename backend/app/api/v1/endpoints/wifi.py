@@ -55,15 +55,18 @@ def _normalize_bssid(value: str) -> str:
 
 
 def _detect_local_ip_for_kali() -> str:
+    """自动探测本机 IP (用于 Kali 回连)"""
     host = getattr(ssh_client, "host", None) or settings.KALI_HOST
     port = getattr(settings, "KALI_PORT", 22)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        # 尝试连接 Kali 端口，系统会自动选择正确的出口 IP
         s.connect((host, port))
         ip = s.getsockname()[0]
         return ip or "127.0.0.1"
     except Exception:
         try:
+            # 备用：尝试连接公网 DNS
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             return ip or "127.0.0.1"
@@ -189,7 +192,7 @@ async def download_handshake(filename: str):
 
 
 # ==========================================
-# 3. Agent 智能部署接口
+# 3. Agent 智能部署接口 (已修复 IP 注入)
 # ==========================================
 @router.post("/agent/deploy")
 async def deploy_agent_via_ssh():
@@ -199,9 +202,14 @@ async def deploy_agent_via_ssh():
     # 1. SSH 连接检查
     if not ssh_client.client:
         print(f"[DEBUG] 正在建立 SSH 连接...")
-        ssh_client.connect()
-        if not ssh_client.client:
-            return {"status": "error", "message": "SSH 连接失败"}
+        try:
+            ssh_client.connect()
+        except Exception as e:
+            return {"status": "error", "message": f"SSH 连接失败: {str(e)}"}
+
+    if not ssh_client.client:
+        return {"status": "error", "message": "SSH 连接失败"}
+
     print(f"[DEBUG] ✅ SSH 连接状态正常")
 
     # 2. 智能定位 Payload
@@ -236,11 +244,18 @@ async def deploy_agent_via_ssh():
         if "No such file" in file_check or not file_check:
             return {"status": "error", "message": "文件上传失败"}
 
-        # 5. 注入回连 IP
-        local_ip = _detect_local_ip_for_kali()
-        print(f"[DEBUG] 注入 C2 回连 IP: {local_ip}")
-        # 使用 sed 修改 Python 脚本中的 IP
+        # 5. 🔥 关键修复：IP 注入逻辑 (优先使用 .env 配置)
+        manual_ip = os.getenv("C2_HOST", "")
+        if manual_ip:
+            local_ip = manual_ip
+            print(f"[DEBUG] 使用 .env 强制指定 IP: {local_ip}")
+        else:
+            local_ip = _detect_local_ip_for_kali()
+            print(f"[DEBUG] 自动检测 IP: {local_ip}")
+
+        # 使用 sed 修改 Python 脚本中的 IP 和端口
         ssh_client.exec_command(f"sed -i 's/^FIXED_C2_IP = .*/FIXED_C2_IP = \"{local_ip}\"/g' {remote_path}")
+        ssh_client.exec_command(f"sed -i 's/^PORT = .*/PORT = \"8001\"/g' {remote_path}")
 
         # 6. 启动进程
         print(f"[DEBUG] 正在重启 Agent 进程...")
@@ -262,10 +277,12 @@ async def deploy_agent_via_ssh():
 
         print(f"[DEBUG] ✅ Agent 进程运行中 (PID: {proc_info.split()[1]})")
 
-        # 等待上线
-        online_deadline = time.time() + 12
+        # 8. 等待回连
+        print("[DEBUG] 等待 Agent 心跳包...")
+        online_deadline = time.time() + 10
         while time.time() < online_deadline:
-            if (time.time() - c2_state.get("last_heartbeat", 0)) < 10 and c2_state.get("interfaces"):
+            # 检查最近 5 秒是否有心跳
+            if (time.time() - c2_state.get("last_heartbeat", 0)) < 5 and c2_state.get("interfaces"):
                 return {"status": "success", "message": "Agent 已成功部署并上线", "c2_ip": local_ip}
             await asyncio.sleep(1)
 
@@ -273,8 +290,8 @@ async def deploy_agent_via_ssh():
         stdin, stdout, stderr = ssh_client.exec_command("tail -n 80 /tmp/agent.log || true")
         log_tail = stdout.read().decode(errors="ignore")
         return {
-            "status": "success",
-            "message": "Agent 已运行但未回连 (请检查防火墙端口 8000/8001)",
+            "status": "warning",
+            "message": f"Agent 已运行但未回连 (IP: {local_ip})，请检查防火墙或 .env 配置。",
             "c2_ip": local_ip,
             "agent_log_tail": log_tail
         }
